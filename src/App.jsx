@@ -7,7 +7,7 @@ import {
 import {
   Waves, Bike, Footprints, Dumbbell, Moon, ChevronLeft, ChevronRight, Plus, X,
   Check, TrendingUp, Award, Calendar, Target, ArrowLeftRight, Flag, Sparkles,
-  AlertTriangle, Edit3, Trash2, Settings, Grid3x3,
+  AlertTriangle, Edit3, Trash2, Settings, Grid3x3, RefreshCw,
 } from 'lucide-react';
 
 /* ============================== CONSTANTS ============================== */
@@ -27,8 +27,19 @@ const DISCIPLINE_META = {
   fietsen: { label: 'Fietsen', icon: Bike, color: '#C1552C' },
   hardlopen: { label: 'Hardlopen', icon: Footprints, color: '#D9A441' },
   kracht: { label: 'Kracht', icon: Dumbbell, color: '#8A5A44' },
+  wedstrijd: { label: 'Wedstrijd', icon: Flag, color: '#9C3D54' },
   rust: { label: 'Rust', icon: Moon, color: '#8A7460' },
 };
+
+const RACE_ADD_TYPES = [
+  { key: 'sprint', label: 'Sprint triatlon', totalKm: RACE_TYPES.sprint.swim + RACE_TYPES.sprint.bike + RACE_TYPES.sprint.run },
+  { key: 'olympic', label: 'Olympische triatlon', totalKm: RACE_TYPES.olympic.swim + RACE_TYPES.olympic.bike + RACE_TYPES.olympic.run },
+  { key: 'half', label: 'Halve triatlon (70.3)', totalKm: RACE_TYPES.half.swim + RACE_TYPES.half.bike + RACE_TYPES.half.run },
+  { key: 'full', label: 'Volledige triatlon', totalKm: RACE_TYPES.full.swim + RACE_TYPES.full.bike + RACE_TYPES.full.run },
+  { key: 'hardloop', label: 'Hardloopwedstrijd', manual: true, unit: 'km' },
+  { key: 'zwem', label: 'Zwemwedstrijd', manual: true, unit: 'm' },
+  { key: 'overig', label: 'Andere wedstrijd', manual: true, unit: 'km' },
+];
 
 const TEMPLATES = {
   3: ['zwemmen', 'fietsen', 'hardlopen'],
@@ -45,10 +56,24 @@ const DAY_ASSIGN = {
 
 const MOD = { duurloop: 1, interval: 0.65, herstel: 0.5, tempo: 0.85, techniek: 0.55, 'lange training': 1.5, kracht: 1, fartlek: 0.75, heuveltraining: 0.6, brick: 1.2, openwater: 0.7, klimtraining: 0.75, mobiliteit: 1, core: 1 };
 const HARDNESS = { duurloop: 1, interval: 3, herstel: 0, tempo: 2, techniek: 1, 'lange training': 2, kracht: 1, fartlek: 2, heuveltraining: 3, brick: 3, openwater: 1, klimtraining: 2, mobiliteit: 0, core: 1, rust: 0 };
+// Hoe ver de langste sessie van het jaar t.o.v. de wedstrijdafstand moet komen, per wedstrijdtype.
+const PEAK_LONG_FACTOR = {
+  sprint: { zwemmen: 1.0, fietsen: 1.3, hardlopen: 1.4 },
+  olympic: { zwemmen: 1.0, fietsen: 1.2, hardlopen: 1.3 },
+  half: { zwemmen: 0.65, fietsen: 0.95, hardlopen: 0.85 },
+  full: { zwemmen: 0.55, fietsen: 0.85, hardlopen: 0.75 },
+};
+// Welk aandeel van het wekelijks volume de lange/kwaliteitssessie normaal gesproken vormt.
+const SESSION_SHARE = {
+  zwemmen: { basis: 1, lang: 0.6, kwaliteit: 0.4 },
+  fietsen: { basis: 1, lang: 0.62, kwaliteit: 0.38 },
+  hardlopen: { basis: 1, lang: 0.58, kwaliteit: 0.42 },
+};
+const MIN_SESSION_KM = { zwemmen: 0.3, fietsen: 8, hardlopen: 2 };
 const PHASE_MULT = { basis: 1, opbouw: 1.12, piek: 1.22, taper: 0.55 };
-const PHASE_LABEL = { basis: 'Basisfase', opbouw: 'Opbouwfase', piek: 'Piekfase', taper: 'Taper' };
+const PHASE_LABEL = { basis: 'Conditiefase', opbouw: 'Opbouwfase', piek: 'Piekfase', taper: 'Taper' };
 const PHASE_TEXT = {
-  basis: 'We zitten in de basisfase: rustig volume opbouwen als fundament.',
+  basis: 'We zitten in de conditiefase: rustig volume opbouwen als basis-conditie.',
   opbouw: 'In de opbouwfase draaien we volume en intensiteit langzaam op.',
   piek: 'We naderen de wedstrijd: dit zijn je scherpste, meest specifieke trainingen.',
   taper: 'Tapertijd: het volume gaat omlaag zodat je fris aan de start staat.',
@@ -241,40 +266,66 @@ function sumDisciplineVolumeKm(week, discipline) {
     .reduce((a, s) => a + (s.target.unit === 'm' ? s.target.amount / 1000 : s.target.unit === 'km' ? s.target.amount : 0), 0);
 }
 
-function computeWeeklyVolumes(intake, phase, weekNumber, adaptFactor, isDeload, prevWeek) {
-  const phaseMult = PHASE_MULT[phase] * (isDeload ? 0.65 : 1);
+function computeGoalWeeklyPeak(discipline, raceType, baseWeekly, expCap) {
+  const raceKey = discipline === 'zwemmen' ? 'swim' : discipline === 'fietsen' ? 'bike' : 'run';
+  const raceDist = RACE_TYPES[raceType][raceKey];
+  const factor = (PEAK_LONG_FACTOR[raceType] || PEAK_LONG_FACTOR.olympic)[discipline];
+  const share = SESSION_SHARE[discipline].lang;
+  const requiredWeekly = (raceDist * factor) / share;
+  const safeCeiling = Math.max(baseWeekly, 0.1) * expCap;
+  const peak = Math.min(Math.max(requiredWeekly, baseWeekly), safeCeiling);
+  return { peak, requiredWeekly, ambitious: requiredWeekly > safeCeiling };
+}
+
+function computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, adaptFactor, isDeload, prevWeek) {
   const bases = { zwemmen: intake.swim.volumeKm, fietsen: intake.bike.volumeKm, hardlopen: intake.run.volumeKm };
+  const manualTargets = { zwemmen: intake.swim.targetVolumeKm, fietsen: intake.bike.targetVolumeKm, hardlopen: intake.run.targetVolumeKm };
   const exps = { zwemmen: intake.swim.experience, fietsen: intake.bike.experience, hardlopen: intake.run.experience };
-  const result = {};
+  const result = {}; const meta = {};
+  const peakWeekNumber = Math.max(totalWeeks - 2, 1); // laatste 2 weken zijn taper
   ['zwemmen', 'fietsen', 'hardlopen'].forEach((disc) => {
-    const growth = EXPERIENCE_GROWTH[exps[disc]] ?? 1;
+    const base = Math.max(bases[disc] || 0, 0);
     const cap = EXPERIENCE_CAP[exps[disc]] ?? 1.6;
-    const progression = Math.min(1 + (weekNumber - 1) * 0.035 * growth, cap);
-    let vol = bases[disc] * phaseMult * progression * adaptFactor;
+    const goal = computeGoalWeeklyPeak(disc, mainGoal.raceType, base, cap);
+    const manual = manualTargets[disc];
+    // Piekvolume: handmatige instelling > wat de wedstrijdafstand vereist (nooit meer dan veilig, nooit minder dan nu)
+    const peak = manual && manual > 0 ? Math.max(manual, base) : goal.peak;
+    let vol;
+    if (weekNumber >= totalWeeks) vol = peak * 0.35; // wedstrijdweek zelf: scherpe taper
+    else if (weekNumber === totalWeeks - 1) vol = peak * 0.55; // laatste volle trainingsweek
+    else {
+      const frac = Math.min(Math.max((weekNumber - 1) / Math.max(peakWeekNumber - 1, 1), 0), 1);
+      vol = base + (peak - base) * frac; // gelijkmatige opbouw van je huidige niveau naar het piekvolume
+    }
+    if (isDeload) vol *= 0.7;
+    vol *= Math.min(Math.max(adaptFactor, 0.85), 1.12); // resultaten sturen licht bij, de doelcurve blijft leidend
     if (prevWeek && phase !== 'taper' && !isDeload) {
       const prevVol = sumDisciplineVolumeKm(prevWeek, disc);
-      if (prevVol > 0.5) vol = Math.min(vol, prevVol * 1.12);
+      if (prevVol > 0.5) vol = Math.min(vol, prevVol * 1.15); // nooit meer dan ~15% erbij t.o.v. vorige week
     }
     if (disc === 'hardlopen' && (intake.injuries || '').trim()) vol *= 0.85;
-    result[disc] = Math.max(vol, bases[disc] * 0.35);
+    result[disc] = Math.max(vol, base * 0.35, MIN_SESSION_KM[disc]);
+    meta[disc] = { base, peak, required: goal.requiredWeekly, ambitious: !manual && goal.ambitious, manualOverride: Boolean(manual) };
   });
+  result.__meta = meta;
   return result;
 }
 
-function computeTargetValue(discipline, type, weeklyVolumes, weekNumber, phase, sessionsCount) {
+function computeTargetValue(discipline, type, role, weeklyVolumes, weekNumber, phase) {
   if (discipline === 'rust') return null;
   if (discipline === 'kracht' || type === 'mobiliteit' || type === 'core') {
     const dur = Math.round(Math.min(35 + weekNumber * 1.5, 60) * (phase === 'taper' ? 0.7 : 1));
     return { amount: dur, unit: 'min', label: `${dur} min` };
   }
-  const weeklyVol = weeklyVolumes[discipline];
-  const modifier = MOD[type] ?? 1;
-  const perSession = (weeklyVol / Math.max(sessionsCount, 1)) * modifier;
+  const weeklyVol = weeklyVolumes[discipline] || 0;
+  const shareMap = SESSION_SHARE[discipline] || { basis: 1 };
+  const share = shareMap[role] ?? shareMap.basis ?? 1;
+  const perSessionKm = Math.max(weeklyVol * share, MIN_SESSION_KM[discipline] || 1);
   if (discipline === 'zwemmen') {
-    const amount = Math.max(Math.round((perSession * 1000) / 50) * 50, 200);
+    const amount = Math.max(Math.round((perSessionKm * 1000) / 50) * 50, 300);
     return { amount, unit: 'm', label: `${amount} m` };
   }
-  const amount = Math.max(Math.round(perSession * 10) / 10, 1);
+  const amount = Math.max(Math.round(perSessionKm * 10) / 10, MIN_SESSION_KM[discipline] || 1);
   return { amount, unit: 'km', label: `${amount} km` };
 }
 
@@ -304,7 +355,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
   const daysPerWeek = Math.min(Math.max(intake.daysPerWeek, 3), 6);
   const template = TEMPLATES[daysPerWeek];
   const dayIdx = buildDayAssignments(template, defaultDays);
-  const weeklyVolumes = computeWeeklyVolumes(intake, phase, weekNumber, adaptFactor, isDeload, prevWeek);
+  const weeklyVolumes = computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, adaptFactor, isDeload, prevWeek);
 
   const counts = {};
   template.forEach((d) => { counts[d] = (counts[d] || 0) + 1; });
@@ -356,7 +407,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
       brickNote = 'Sluit af met 10-15 minuten hardlopen op wedstrijdtempo direct na het fietsen — dat traint je "wisselbenen".';
       wasDowngraded = false;
     }
-    const target = computeTargetValue(discipline, type, weeklyVolumes, weekNumber, phase, total);
+    const target = computeTargetValue(discipline, type, role, weeklyVolumes, weekNumber, phase);
     const guide = paceGuidance(discipline, type, intake);
     daySessions[d] = {
       id: uid('s'),
@@ -372,7 +423,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
     prevHardness = HARDNESS[type] ?? 1;
   }
 
-  return { id: uid('w'), weekNumber, startDate: startDate.toISOString(), phase, isDeload, adaptFactor, adaptNote, sessions: daySessions };
+  return { id: uid('w'), weekNumber, startDate: startDate.toISOString(), phase, isDeload, adaptFactor, adaptNote, weeklyVolumeMeta: weeklyVolumes.__meta, sessions: daySessions };
 }
 
 function linreg(points) {
@@ -417,9 +468,9 @@ export default function App() {
   const [subGoals, setSubGoals] = useState([]);
   const [newSubGoal, setNewSubGoal] = useState({ text: '', targetDate: '' });
   const [intake, setIntake] = useState({
-    swim: { volumeKm: 3, pace: '2:15', experience: 'gevorderd' },
-    bike: { volumeKm: 80, speedKmh: 28, experience: 'gevorderd' },
-    run: { volumeKm: 25, paceMinKm: '5:30', experience: 'gevorderd' },
+    swim: { volumeKm: 3, pace: '2:15', experience: 'gevorderd', targetVolumeKm: null },
+    bike: { volumeKm: 80, speedKmh: 28, experience: 'gevorderd', targetVolumeKm: null },
+    run: { volumeKm: 25, paceMinKm: '5:30', experience: 'gevorderd', targetVolumeKm: null },
     strength: { sessionsPerWeek: 1, experience: 'gevorderd' },
     daysPerWeek: 5,
     injuries: '',
@@ -511,6 +562,44 @@ export default function App() {
     setWeeks((w) => [...w, nextWeek]);
     setCurrentWeekIndex(weeks.length);
     setResultsWeekIndex(weeks.length);
+  }
+
+  function regenerateWeek(weekIndex) {
+    setWeeks((ws) => {
+      const week = ws[weekIndex];
+      const prevWeek = weekIndex > 0 ? ws[weekIndex - 1] : null;
+      const fresh = generateWeek(week.weekNumber, new Date(week.startDate), intake, mainGoal, prevWeek, totalWeeks, defaultDays);
+      return ws.map((w, i) => (i === weekIndex ? { ...fresh, id: w.id } : w));
+    });
+  }
+
+  function addRaceToDay(weekId, sessionId, raceName, raceTypeLabel, target) {
+    setWeeks((ws) => ws.map((w) => {
+      if (w.id !== weekId) return w;
+      const raceSession = w.sessions.find((s) => s.id === sessionId);
+      const raceDay = raceSession ? raceSession.day : null;
+      const neighborDays = raceDay == null ? [] : [raceDay - 1, raceDay + 1].filter((d) => d >= 0 && d <= 6);
+      return {
+        ...w,
+        sessions: w.sessions.map((s) => {
+          if (s.id === sessionId) {
+            return {
+              ...s, discipline: 'wedstrijd', type: raceTypeLabel, raceName: raceName || raceTypeLabel, target,
+              intensity: 'Wedstrijdtempo — geef het onderweg alles, maar blijf binnen je grenzen.',
+              coachNote: `Wedstrijd ingepland: ${raceName || raceTypeLabel}. Dit is geen training maar een meetmoment voor je tempo en pacing — neem de dag ervoor en erna rustig om fris te starten en goed te herstellen.`,
+              status: 'gepland', result: null,
+            };
+          }
+          if (neighborDays.includes(s.day) && s.discipline !== 'rust' && s.discipline !== 'wedstrijd' && (HARDNESS[s.type] ?? 0) >= 2) {
+            return {
+              ...s, discipline: 'rust', type: 'rust', target: null, intensity: INTENSITY.rust,
+              coachNote: 'Automatisch op rust gezet, zodat je fris bent rond je wedstrijd.', status: 'gepland', result: null,
+            };
+          }
+          return s;
+        }),
+      };
+    }));
   }
 
   function updateSession(weekId, sessionId, updater) {
@@ -847,12 +936,17 @@ export default function App() {
     const Icon = meta.icon;
     const st = STATUS_META[session.status];
     const isTraining = session.discipline !== 'rust';
+    const isRace = session.discipline === 'wedstrijd';
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [adding, setAdding] = useState(false);
     const [addDiscipline, setAddDiscipline] = useState('zwemmen');
     const [addType, setAddType] = useState(TYPE_OPTIONS.zwemmen[0]);
     const [addCustomType, setAddCustomType] = useState('');
     const [addAmount, setAddAmount] = useState('');
+    const [addingRace, setAddingRace] = useState(false);
+    const [raceName, setRaceName] = useState('');
+    const [raceTypeKey, setRaceTypeKey] = useState('sprint');
+    const [raceManualAmount, setRaceManualAmount] = useState('');
 
     function chooseAddDiscipline(d) {
       setAddDiscipline(d);
@@ -866,9 +960,22 @@ export default function App() {
       addSessionToDay(week.id, session.id, addDiscipline, finalType, amt, DEFAULT_UNIT[addDiscipline]);
       setAdding(false); setAddAmount(''); setAddCustomType('');
     }
+    function saveRace() {
+      const rt = RACE_ADD_TYPES.find((t) => t.key === raceTypeKey);
+      let target;
+      if (rt.manual) {
+        const amt = parseFloat(raceManualAmount);
+        if (!amt || amt <= 0) return;
+        target = { amount: amt, unit: rt.unit, label: `${amt} ${rt.unit}` };
+      } else {
+        target = { amount: rt.totalKm, unit: 'km', label: `${rt.label} (${rt.totalKm} km totaal)` };
+      }
+      addRaceToDay(week.id, session.id, raceName.trim(), rt.label, target);
+      setAddingRace(false); setRaceName(''); setRaceManualAmount('');
+    }
 
     return (
-      <div className="tri-card" style={{ marginBottom: 10 }}>
+      <div className="tri-card" style={{ marginBottom: 10, ...(isRace ? { border: `1.5px solid ${meta.color}`, background: `${meta.color}0D` } : {}) }}>
         <div style={{ display: 'flex', gap: 12 }}>
           <div className="tri-icon-circle" style={{ background: meta.color + '20' }}>
             <Icon size={20} color={meta.color} />
@@ -877,7 +984,9 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
               <div>
                 <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase' }}>{DAYS_FULL[session.day]}</div>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{meta.label}{isTraining ? ` · ${session.type}` : ''}</div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>
+                  {isRace ? (session.raceName || meta.label) : meta.label}{isTraining ? ` · ${session.type}` : ''}
+                </div>
               </div>
               <span className="tri-badge" style={{ background: st.bg, color: st.color, flexShrink: 0 }}>{st.label}</span>
             </div>
@@ -914,11 +1023,47 @@ export default function App() {
               </div>
             )}
 
-            {!isTraining && !compact && !adding && (
-              <button className="tri-btn tri-btn-secondary" style={{ padding: '10px 14px', fontSize: 13, minHeight: 40, marginTop: 12 }}
-                onClick={() => setAdding(true)}>
-                <Plus size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} />Training toevoegen
-              </button>
+            {!isTraining && !compact && !adding && !addingRace && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                <button className="tri-btn tri-btn-secondary" style={{ padding: '10px 14px', fontSize: 13, minHeight: 40 }}
+                  onClick={() => setAdding(true)}>
+                  <Plus size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} />Training toevoegen
+                </button>
+                <button className="tri-btn" style={{ padding: '10px 14px', fontSize: 13, minHeight: 40, background: `${DISCIPLINE_META.wedstrijd.color}1F`, color: DISCIPLINE_META.wedstrijd.color }}
+                  onClick={() => setAddingRace(true)}>
+                  <Flag size={14} style={{ verticalAlign: 'middle', marginRight: 5 }} />Wedstrijd toevoegen
+                </button>
+              </div>
+            )}
+
+            {!isTraining && addingRace && (
+              <div style={{ marginTop: 12 }}>
+                <div className="tri-field">
+                  <label className="tri-label">Naam wedstrijd (optioneel)</label>
+                  <input className="tri-input" placeholder="bv. Regio Triatlon Almere" value={raceName} onChange={(e) => setRaceName(e.target.value)} />
+                </div>
+                <div className="tri-field">
+                  <label className="tri-label">Type wedstrijd</label>
+                  <select className="tri-select" value={raceTypeKey} onChange={(e) => setRaceTypeKey(e.target.value)}>
+                    {RACE_ADD_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                  </select>
+                </div>
+                {RACE_ADD_TYPES.find((t) => t.key === raceTypeKey).manual ? (
+                  <div className="tri-field">
+                    <label className="tri-label">Afstand ({RACE_ADD_TYPES.find((t) => t.key === raceTypeKey).unit})</label>
+                    <input type="number" className="tri-input" value={raceManualAmount} onChange={(e) => setRaceManualAmount(e.target.value)}
+                      placeholder={RACE_ADD_TYPES.find((t) => t.key === raceTypeKey).unit === 'm' ? 'bv. 1500' : 'bv. 10'} />
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4 }}>
+                    Totaalafstand: {RACE_ADD_TYPES.find((t) => t.key === raceTypeKey).totalKm} km (zwem + fiets + hardlopen)
+                  </p>
+                )}
+                <div className="tri-row">
+                  <button className="tri-btn tri-btn-secondary" onClick={() => { setAddingRace(false); setRaceName(''); setRaceManualAmount(''); }}>Annuleren</button>
+                  <button className="tri-btn tri-btn-primary" disabled={RACE_ADD_TYPES.find((t) => t.key === raceTypeKey).manual && !raceManualAmount} onClick={saveRace}>Toevoegen</button>
+                </div>
+              </div>
             )}
 
             {!isTraining && adding && (
@@ -1073,6 +1218,7 @@ export default function App() {
 
   /* --------------------------- Schedule tab --------------------------- */
   function ScheduleTab() {
+    const [regenConfirm, setRegenConfirm] = useState(false);
     if (!currentWeek) return null;
     const trainCount = currentWeek.sessions.filter((s) => s.discipline !== 'rust').length;
     const doneCount = currentWeek.sessions.filter((s) => s.discipline !== 'rust' && (s.status === 'voltooid' || s.status === 'aangepast')).length;
@@ -1095,7 +1241,23 @@ export default function App() {
             {currentWeek.isDeload && <span className="tri-badge" style={{ background: '#F6E3C0', color: 'var(--warning)' }}>Hersteweek</span>}
             <span style={{ fontSize: 12, color: 'var(--muted)' }}>{doneCount}/{trainCount} trainingen afgerond</span>
           </div>
-          <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>{currentWeek.adaptNote}</p>
+          <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>{PHASE_TEXT[currentWeek.phase]}</p>
+          <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4, marginBottom: 0 }}>{currentWeek.adaptNote}</p>
+          {!regenConfirm ? (
+            <button className="tri-btn tri-btn-secondary" style={{ marginTop: 12, padding: '9px 14px', fontSize: 13, minHeight: 38 }}
+              onClick={() => setRegenConfirm(true)}>
+              <RefreshCw size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />Deze week hergenereren
+            </button>
+          ) : (
+            <div style={{ marginTop: 12, background: '#F6E3C0', borderRadius: 12, padding: 12 }}>
+              <p style={{ fontSize: 13, margin: '0 0 10px' }}>Week {currentWeek.weekNumber} opnieuw laten opbouwen? Handmatige aanpassingen en ingevulde resultaten in deze week gaan dan verloren.</p>
+              <div className="tri-row">
+                <button className="tri-btn tri-btn-secondary" style={{ minHeight: 38, fontSize: 13 }} onClick={() => setRegenConfirm(false)}>Annuleren</button>
+                <button className="tri-btn" style={{ minHeight: 38, fontSize: 13, background: 'var(--terracotta)', color: '#fff' }}
+                  onClick={() => { regenerateWeek(currentWeekIndex); setRegenConfirm(false); }}>Ja, hergenereren</button>
+              </div>
+            </div>
+          )}
         </div>
 
         {currentWeek.sessions.map((s) => <SessionCard key={s.id} session={s} week={currentWeek} />)}
@@ -1140,7 +1302,15 @@ export default function App() {
             ))}
           </div>
         </div>
-        {status !== 'overgeslagen' && (
+        {status !== 'overgeslagen' && session.discipline === 'wedstrijd' && (
+          <div className="tri-row">
+            <div className="tri-field"><label className="tri-label">Eindtijd (uu:mm:ss)</label>
+              <input className="tri-input" placeholder="bv. 1:23:45" value={duration} onChange={(e) => setDuration(e.target.value)} /></div>
+            <div className="tri-field"><label className="tri-label">RPE (1-10): {rpe}</label>
+              <input type="range" min="1" max="10" value={rpe} onChange={(e) => setRpe(e.target.value)} style={{ width: '100%', marginTop: 12 }} /></div>
+          </div>
+        )}
+        {status !== 'overgeslagen' && session.discipline !== 'wedstrijd' && (
           <>
             <div className="tri-row">
               <div className="tri-field"><label className="tri-label">Afstand/duur</label>
@@ -1201,7 +1371,7 @@ export default function App() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>{DAYS_FULL[s.day]}</div>
-                  <div style={{ fontWeight: 700, fontSize: 15 }}>{DISCIPLINE_META[s.discipline].label} · {s.type}</div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>{s.discipline === 'wedstrijd' ? (s.raceName || DISCIPLINE_META.wedstrijd.label) : DISCIPLINE_META[s.discipline].label} · {s.type}</div>
                   <div style={{ fontSize: 13, color: 'var(--muted)' }}>{s.target?.label}</div>
                 </div>
                 <span className="tri-badge" style={{ background: STATUS_META[s.status].bg, color: STATUS_META[s.status].color }}>{STATUS_META[s.status].label}</span>
@@ -1518,6 +1688,46 @@ export default function App() {
               <h2 style={{ fontSize: 19 }}>Instellingen</h2>
               <button className="tri-btn tri-btn-secondary" style={{ minHeight: 38, padding: '6px 10px' }} onClick={() => setShowSettings(false)}><X size={18} /></button>
             </div>
+            <h3 style={{ fontSize: 15, marginTop: 4, marginBottom: 2 }}>Trainingsvolume</h3>
+            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Pas je huidige wekelijkse kilometers aan, of stel zelf een piekvolume in. Nieuw gegenereerde weken bouwen hier geleidelijk naartoe op.</p>
+            {['zwemmen', 'fietsen', 'hardlopen'].map((d) => {
+              const key = d === 'zwemmen' ? 'swim' : d === 'fietsen' ? 'bike' : 'run';
+              const meta = DISCIPLINE_META[d];
+              const info = currentWeek?.weeklyVolumeMeta?.[d];
+              return (
+                <div key={d} style={{ border: '1px solid var(--sand)', borderRadius: 14, padding: 12, marginBottom: 10 }}>
+                  <div className="tri-label" style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                    <meta.icon size={14} color={meta.color} /> {meta.label}
+                  </div>
+                  <div className="tri-row">
+                    <div className="tri-field" style={{ marginBottom: 6 }}>
+                      <label className="tri-label">Huidig volume (km/week)</label>
+                      <input type="number" step="0.5" min="0" className="tri-input" value={intake[key].volumeKm}
+                        onChange={(e) => setIntake((i) => ({ ...i, [key]: { ...i[key], volumeKm: Math.max(+e.target.value, 0) } }))} />
+                    </div>
+                    <div className="tri-field" style={{ marginBottom: 6 }}>
+                      <label className="tri-label">Eigen piekvolume (optioneel)</label>
+                      <input type="number" step="0.5" min="0" className="tri-input" value={intake[key].targetVolumeKm ?? ''}
+                        placeholder={info ? `auto ~${Math.round(info.peak)} km` : 'automatisch'}
+                        onChange={(e) => setIntake((i) => ({ ...i, [key]: { ...i[key], targetVolumeKm: e.target.value === '' ? null : Math.max(+e.target.value, 0) } }))} />
+                    </div>
+                  </div>
+                  {info && !info.manualOverride && info.ambitious && (
+                    <p style={{ fontSize: 12, color: 'var(--warning)', margin: '4px 0 0' }}>
+                      Voor {RACE_TYPES[mainGoal.raceType].label.toLowerCase()} zou ~{Math.round(info.required)} km/week nodig zijn — dat is een grote sprong vanaf je huidige niveau. We bouwen zo ver mogelijk veilig op richting ~{Math.round(info.peak)} km/week; overweeg je ambitie of tijdlijn bij te stellen.
+                    </p>
+                  )}
+                  {info && !info.manualOverride && !info.ambitious && (
+                    <p style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 0' }}>Automatisch berekend piekvolume: ~{Math.round(info.peak)} km/week, gebaseerd op je wedstrijdafstand.</p>
+                  )}
+                  {info && info.manualOverride && (
+                    <p style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 0' }}>Je eigen piekvolume wordt gebruikt vanaf de volgende gegenereerde week.</p>
+                  )}
+                </div>
+              );
+            })}
+
+            <h3 style={{ fontSize: 15, marginTop: 14, marginBottom: 2 }}>Traindagen</h3>
             <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>Standaard traindag(en) per sport — kies er één of meerdere. Nieuw gegenereerde weken houden hier rekening mee.</p>
             {['zwemmen', 'fietsen', 'hardlopen', 'kracht'].map((d) => {
               const meta = DISCIPLINE_META[d];
