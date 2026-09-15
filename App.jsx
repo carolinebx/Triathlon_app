@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { loadLocal, saveLocal, loadRemote, saveRemote, hasRemote } from './lib/sheetsApi.js';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -7,7 +7,8 @@ import {
 import {
   Waves, Bike, Footprints, Dumbbell, Moon, ChevronLeft, ChevronRight, Plus, X,
   Check, TrendingUp, Award, Calendar, Target, ArrowLeftRight, Flag, Sparkles,
-  AlertTriangle, Edit3, Trash2, Settings, Grid3x3, RefreshCw,
+  AlertTriangle, Edit3, Trash2, Settings, Grid3x3, RefreshCw, GripVertical,
+  Utensils, Upload, Medal,
 } from 'lucide-react';
 
 /* ============================== CONSTANTS ============================== */
@@ -70,6 +71,26 @@ const SESSION_SHARE = {
   hardlopen: { basis: 1, lang: 0.58, kwaliteit: 0.42 },
 };
 const MIN_SESSION_KM = { zwemmen: 0.3, fietsen: 8, hardlopen: 2 };
+// Taperlengte schaalt mee met de wedstrijdafstand: hoe langer de wedstrijd, hoe meer rust vooraf nodig is.
+const TAPER_WEEKS = { sprint: 1, olympic: 1, half: 2, full: 3 };
+const TAPER_FACTORS = { 1: [0.4], 2: [0.55, 0.35], 3: [0.65, 0.5, 0.35] };
+const RIEGEL_EXPONENT = 1.06; // standaard exponent voor het schalen van duurprestaties naar een andere afstand
+const NUTRITION_TIPS = {
+  'lange training': 'Voeding: neem vanaf ~60-90 min elke 30-45 min zo\'n 30-60g koolhydraten en drink regelmatig — oefen hiermee je wedstrijdvoeding.',
+  interval: 'Voeding: zorg dat je 1,5-2 uur van tevoren goed gegeten hebt; tijdens de sessie zelf is voeding meestal niet nodig.',
+  tempo: 'Voeding: een lichte koolhydraatsnack 60-90 min vooraf helpt dit tempo vol te houden.',
+  brick: 'Voeding: oefen hier je wedstrijdvoeding — eet/drink op de fiets zoals je dat op wedstrijddag zou doen.',
+  duurloop: 'Voeding: bij meer dan een uur, neem water mee en drink/eet elke 30-40 min iets kleins.',
+  'lange duurtraining': 'Voeding: neem vanaf ~60-90 min elke 30-45 min zo\'n 30-60g koolhydraten.',
+  herstel: 'Voeding: focus na afloop op koolhydraten + eiwitten binnen 30-60 minuten voor herstel.',
+  techniek: 'Voeding: een normale maaltijd 2 uur vooraf is voldoende, dit is geen belastende sessie.',
+  klimtraining: 'Voeding: zorg voor voldoende koolhydraten vooraf, dit vraagt veel spierglycogeen.',
+  heuveltraining: 'Voeding: eet 1-2 uur vooraf iets lichts verteerbaars.',
+  fartlek: 'Voeding: een normale maaltijd 1,5-2 uur vooraf volstaat.',
+  openwater: 'Voeding: neem indien >60 min een koolhydraatgel mee die je kunt nuttigen bij een keerpunt.',
+  wedstrijd: 'Voeding: volg je geoefende wedstrijdvoeding — probeer op de dag zelf niets nieuws.',
+  kracht: 'Voeding: eet 1-2 uur vooraf een lichte maaltijd en hydrateer goed.',
+};
 const PHASE_MULT = { basis: 1, opbouw: 1.12, piek: 1.22, taper: 0.55 };
 const PHASE_LABEL = { basis: 'Conditiefase', opbouw: 'Opbouwfase', piek: 'Piekfase', taper: 'Taper' };
 const PHASE_TEXT = {
@@ -253,8 +274,8 @@ function computeAdaptation(prevWeek) {
   return { factor: 0.93, note: `Wisselvallige week (${pct}% afgerond). Kleine correctie naar beneden.` };
 }
 
-function getPhase(weeksRemaining, totalWeeks) {
-  if (weeksRemaining <= 2) return 'taper';
+function getPhase(weeksRemaining, totalWeeks, taperWeeks) {
+  if (weeksRemaining <= taperWeeks) return 'taper';
   if (weeksRemaining > totalWeeks * 0.66) return 'basis';
   if (weeksRemaining > totalWeeks * 0.3) return 'opbouw';
   return 'piek';
@@ -282,7 +303,9 @@ function computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, a
   const manualTargets = { zwemmen: intake.swim.targetVolumeKm, fietsen: intake.bike.targetVolumeKm, hardlopen: intake.run.targetVolumeKm };
   const exps = { zwemmen: intake.swim.experience, fietsen: intake.bike.experience, hardlopen: intake.run.experience };
   const result = {}; const meta = {};
-  const peakWeekNumber = Math.max(totalWeeks - 2, 1); // laatste 2 weken zijn taper
+  const taperWeeks = TAPER_WEEKS[mainGoal.raceType] ?? 2;
+  const taperFactors = TAPER_FACTORS[taperWeeks] || TAPER_FACTORS[2];
+  const peakWeekNumber = Math.max(totalWeeks - taperWeeks, 1); // laatste taperWeeks weken zijn taper
   ['zwemmen', 'fietsen', 'hardlopen'].forEach((disc) => {
     const base = Math.max(bases[disc] || 0, 0);
     const cap = EXPERIENCE_CAP[exps[disc]] ?? 1.6;
@@ -291,9 +314,10 @@ function computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, a
     // Piekvolume: handmatige instelling > wat de wedstrijdafstand vereist (nooit meer dan veilig, nooit minder dan nu)
     const peak = manual && manual > 0 ? Math.max(manual, base) : goal.peak;
     let vol;
-    if (weekNumber >= totalWeeks) vol = peak * 0.35; // wedstrijdweek zelf: scherpe taper
-    else if (weekNumber === totalWeeks - 1) vol = peak * 0.55; // laatste volle trainingsweek
-    else {
+    const weeksFromEnd = totalWeeks - weekNumber; // 0 = laatste (races)week
+    if (weeksFromEnd < taperWeeks) {
+      vol = peak * taperFactors[Math.min(weeksFromEnd, taperFactors.length - 1)];
+    } else {
       const frac = Math.min(Math.max((weekNumber - 1) / Math.max(peakWeekNumber - 1, 1), 0), 1);
       vol = base + (peak - base) * frac; // gelijkmatige opbouw van je huidige niveau naar het piekvolume
     }
@@ -349,7 +373,8 @@ const QUALITY_ROTATION = {
 function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWeeks, defaultDays) {
   const { factor: adaptFactor, note: adaptNote } = computeAdaptation(prevWeek);
   const weeksRemaining = Math.max(totalWeeks - weekNumber + 1, 1);
-  const phase = getPhase(weeksRemaining, totalWeeks);
+  const taperWeeks = TAPER_WEEKS[mainGoal.raceType] ?? 2;
+  const phase = getPhase(weeksRemaining, totalWeeks, taperWeeks);
   const isDeload = phase !== 'taper' && weekNumber % 4 === 0;
   const isLongCourse = mainGoal.raceType === 'half' || mainGoal.raceType === 'full';
   const daysPerWeek = Math.min(Math.max(intake.daysPerWeek, 3), 6);
@@ -417,6 +442,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
       target,
       intensity: `${INTENSITY[type] || 'Naar eigen inschatting'}${guide ? ` · Doeltempo ${guide}` : ''}`,
       coachNote: buildCoachNote(discipline, type, phase, weekNumber, adaptNote, isFirstOfWeek, intake, isDeload, wasDowngraded, brickNote),
+      nutritionTip: NUTRITION_TIPS[type] || null,
       status: 'gepland',
       result: null,
     };
@@ -457,6 +483,142 @@ function predictValue(series, atWeek, fallback) {
   const reg = linreg(series.map((s) => ({ x: s.week, y: s.value })));
   if (!reg) return fallback;
   return reg.slope * atWeek + reg.intercept;
+}
+
+function parseDurationCell(v) {
+  if (v == null || v === '') return null;
+  const s = String(v).trim();
+  if (/^\d+$/.test(s)) return Number(s); // Strava-export: 'moving time' vaak in hele seconden
+  const parts = s.split(':').map(Number);
+  if (parts.some((p) => isNaN(p))) return null;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return null;
+}
+
+function mapActivityTypeToDiscipline(type) {
+  const t = (type || '').toLowerCase();
+  if (/run|hardloop|jog/.test(t)) return 'hardlopen';
+  if (/ride|bike|cycl|fiets/.test(t)) return 'fietsen';
+  if (/swim|zwem/.test(t)) return 'zwemmen';
+  return null;
+}
+
+function splitCsvLine(line) {
+  const cells = line.match(/("([^"]|"")*"|[^,]*)(,|$)/g) || [];
+  return cells.map((c) => c.replace(/,$/, '').replace(/^"|"$/g, '').replace(/""/g, '"').trim()).filter((_, i, arr) => i < arr.length);
+}
+
+function parseActivitiesCsv(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const headers = splitCsvLine(lines[0]).map((h) => h.toLowerCase());
+  const idx = (names) => headers.findIndex((h) => names.some((n) => h.includes(n)));
+  const dateIdx = idx(['activity date', 'date', 'datum']);
+  const typeIdx = idx(['activity type', 'type']);
+  const distIdx = idx(['distance']);
+  const timeIdx = idx(['moving time', 'elapsed time', 'time', 'duur']);
+  const hrIdx = idx(['average heart rate', 'avg heart rate', 'hartslag', 'heart rate']);
+  const nameIdx = idx(['activity name', 'name', 'naam']);
+  if (dateIdx === -1 || typeIdx === -1) return [];
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = splitCsvLine(lines[i]);
+    if (!cells.length) continue;
+    const date = new Date(cells[dateIdx]);
+    if (isNaN(date)) continue;
+    const rawDist = distIdx !== -1 ? parseFloat((cells[distIdx] || '').replace(',', '.')) : null;
+    const distanceKm = rawDist != null && !isNaN(rawDist) ? (rawDist > 200 ? rawDist / 1000 : rawDist) : null;
+    const durationSec = timeIdx !== -1 ? parseDurationCell(cells[timeIdx]) : null;
+    const hr = hrIdx !== -1 ? parseFloat(cells[hrIdx]) : null;
+    rows.push({ date, type: cells[typeIdx] || '', distanceKm, durationSec, hr: isNaN(hr) ? null : hr, name: nameIdx !== -1 ? cells[nameIdx] : '' });
+  }
+  return rows;
+}
+
+function matchImportedActivities(weeks, activities) {
+  const plannedSessions = [];
+  weeks.forEach((w) => w.sessions.forEach((s) => {
+    if (s.discipline === 'rust' || s.status !== 'gepland') return;
+    plannedSessions.push({ weekId: w.id, session: s, date: addDays(new Date(w.startDate), s.day) });
+  }));
+  const matches = [];
+  activities.forEach((act) => {
+    const disc = mapActivityTypeToDiscipline(act.type);
+    if (!disc) return;
+    let best = null, bestDiff = Infinity;
+    plannedSessions.forEach((p) => {
+      if (p.session.discipline !== disc) return;
+      const diff = Math.abs(daysBetween(p.date, act.date));
+      if (diff <= 1 && diff < bestDiff) { best = p; bestDiff = diff; }
+    });
+    if (best) matches.push({ activity: act, weekId: best.weekId, session: best.session, sessionDate: best.date });
+  });
+  return matches;
+}
+
+function buildResultFromActivity(session, act) {
+  const result = {
+    distance: act.distanceKm != null ? String(Math.round(act.distanceKm * 100) / 100) : '',
+    duration: act.durationSec != null ? secToHMS(act.durationSec) : '',
+    pace: '', speed: '',
+    hr: act.hr != null ? String(Math.round(act.hr)) : '',
+    notes: `Geïmporteerd${act.name ? `: ${act.name}` : ''}`,
+  };
+  if (act.distanceKm && act.durationSec) {
+    if (session.discipline === 'fietsen') result.speed = String(Math.round((act.distanceKm / (act.durationSec / 3600)) * 10) / 10);
+    else if (session.discipline === 'zwemmen') result.pace = secToPaceStr(act.durationSec / (act.distanceKm * 1000 / 100));
+    else if (session.discipline === 'hardlopen') result.pace = secToPaceStr(act.durationSec / act.distanceKm);
+  }
+  return result;
+}
+
+function computeBlockComparison(weeks) {
+  const n = weeks.length;
+  const blockSize = Math.min(4, Math.floor(n / 2));
+  if (blockSize < 2) return null;
+  const recentBlock = weeks.slice(n - blockSize);
+  const priorBlock = weeks.slice(n - blockSize * 2, n - blockSize);
+  if (priorBlock.length < blockSize) return null;
+  function stats(block) {
+    let totalKm = 0, completed = 0, total = 0; const rpes = [];
+    block.forEach((w) => w.sessions.forEach((s) => {
+      if (s.discipline === 'rust') return;
+      total++;
+      if (s.status === 'voltooid' || s.status === 'aangepast') {
+        completed++;
+        const d = parseFloat(s.result?.distance);
+        if (!isNaN(d)) totalKm += d > 100 ? d / 1000 : d;
+        if (s.result?.rpe) rpes.push(Number(s.result.rpe));
+      }
+    }));
+    return {
+      totalKm: Math.round(totalKm * 10) / 10,
+      completionPct: total ? Math.round((completed / total) * 100) : 0,
+      avgRpe: rpes.length ? Math.round((rpes.reduce((a, b) => a + b, 0) / rpes.length) * 10) / 10 : null,
+      label: `Week ${block[0].weekNumber}-${block[block.length - 1].weekNumber}`,
+    };
+  }
+  return { recent: stats(recentBlock), prior: stats(priorBlock) };
+}
+
+function getRaceBasedEstimate(weeks, mainGoal) {
+  const dist = RACE_TYPES[mainGoal.raceType];
+  const targetTotalKm = dist.swim + dist.bike + dist.run;
+  const races = [];
+  weeks.forEach((w) => {
+    w.sessions.forEach((s) => {
+      if (s.discipline !== 'wedstrijd' || s.status !== 'voltooid' || !s.result || !s.result.duration) return;
+      const sec = parseTargetTime(s.result.duration);
+      const rt = RACE_ADD_TYPES.find((t) => t.label === s.type && !t.manual);
+      if (sec && rt && rt.totalKm) races.push({ date: addDays(new Date(w.startDate), s.day), sec, totalKm: rt.totalKm, name: s.raceName || s.type });
+    });
+  });
+  if (!races.length) return null;
+  races.sort((a, b) => b.date - a.date);
+  const latest = races[0];
+  const seconds = latest.sec * Math.pow(targetTotalKm / latest.totalKm, RIEGEL_EXPONENT);
+  return { seconds, sourceName: latest.name, sourceDate: latest.date, sourceKm: latest.totalKm };
 }
 
 /* ============================== APP ============================== */
@@ -573,27 +735,39 @@ export default function App() {
     });
   }
 
-  function addRaceToDay(weekId, sessionId, raceName, raceTypeLabel, target) {
+  function addRaceToDay(weekId, sessionId, raceName, raceTypeLabel, target, priority) {
     setWeeks((ws) => ws.map((w) => {
       if (w.id !== weekId) return w;
       const raceSession = w.sessions.find((s) => s.id === sessionId);
       const raceDay = raceSession ? raceSession.day : null;
-      const neighborDays = raceDay == null ? [] : [raceDay - 1, raceDay + 1].filter((d) => d >= 0 && d <= 6);
+      const dayBefore = raceDay == null ? null : raceDay - 1;
+      const dayAfter = raceDay == null ? null : raceDay + 1;
+      // A-wedstrijd: dag ervoor én erna op rust. B-wedstrijd: alleen dag ervoor verzachten. C-wedstrijd: geen automatische aanpassing.
+      const restDays = priority === 'A' ? [dayBefore, dayAfter].filter((d) => d != null && d >= 0 && d <= 6) : [];
+      const softenDays = priority === 'B' && dayBefore != null && dayBefore >= 0 ? [dayBefore] : [];
       return {
         ...w,
         sessions: w.sessions.map((s) => {
           if (s.id === sessionId) {
+            const priorityLabel = { A: 'hoofddoel (A)', B: 'opbouwwedstrijd (B)', C: 'trainingswedstrijd (C)' }[priority] || 'wedstrijd';
             return {
-              ...s, discipline: 'wedstrijd', type: raceTypeLabel, raceName: raceName || raceTypeLabel, target,
+              ...s, discipline: 'wedstrijd', type: raceTypeLabel, raceName: raceName || raceTypeLabel, target, priority: priority || 'C',
               intensity: 'Wedstrijdtempo — geef het onderweg alles, maar blijf binnen je grenzen.',
-              coachNote: `Wedstrijd ingepland: ${raceName || raceTypeLabel}. Dit is geen training maar een meetmoment voor je tempo en pacing — neem de dag ervoor en erna rustig om fris te starten en goed te herstellen.`,
-              status: 'gepland', result: null,
+              coachNote: `Wedstrijd ingepland als ${priorityLabel}: ${raceName || raceTypeLabel}. Dit is geen training maar een meetmoment voor je tempo en pacing.`,
+              nutritionTip: NUTRITION_TIPS.wedstrijd, status: 'gepland', result: null,
             };
           }
-          if (neighborDays.includes(s.day) && s.discipline !== 'rust' && s.discipline !== 'wedstrijd' && (HARDNESS[s.type] ?? 0) >= 2) {
+          if (restDays.includes(s.day) && s.discipline !== 'rust' && s.discipline !== 'wedstrijd' && (HARDNESS[s.type] ?? 0) >= 2) {
             return {
-              ...s, discipline: 'rust', type: 'rust', target: null, intensity: INTENSITY.rust,
+              ...s, discipline: 'rust', type: 'rust', target: null, intensity: INTENSITY.rust, nutritionTip: null,
               coachNote: 'Automatisch op rust gezet, zodat je fris bent rond je wedstrijd.', status: 'gepland', result: null,
+            };
+          }
+          if (softenDays.includes(s.day) && s.discipline !== 'rust' && s.discipline !== 'wedstrijd' && (HARDNESS[s.type] ?? 0) >= 2) {
+            const softType = s.discipline === 'zwemmen' ? 'techniek' : s.discipline === 'hardlopen' ? 'herstel' : 'duurloop';
+            return {
+              ...s, type: softType, intensity: INTENSITY[softType], nutritionTip: NUTRITION_TIPS[softType] || null,
+              coachNote: `${TYPE_TEXT[softType]} Verzacht omdat er morgen een wedstrijd op het programma staat.`,
             };
           }
           return s;
@@ -606,6 +780,21 @@ export default function App() {
     setWeeks((ws) => ws.map((w) => {
       if (w.id !== weekId) return w;
       return { ...w, sessions: w.sessions.map((s) => (s.id === sessionId ? updater(s) : s)) };
+    }));
+  }
+
+  function applyImportedMatches(matches) {
+    setWeeks((ws) => ws.map((w) => {
+      const relevant = matches.filter((m) => m.weekId === w.id);
+      if (!relevant.length) return w;
+      return {
+        ...w,
+        sessions: w.sessions.map((s) => {
+          const m = relevant.find((r) => r.session.id === s.id);
+          if (!m) return s;
+          return { ...s, status: 'voltooid', result: buildResultFromActivity(s, m.activity) };
+        }),
+      };
     }));
   }
 
@@ -623,6 +812,7 @@ export default function App() {
       target: { amount, unit, label: `${amount} ${unit}` },
       intensity: `${INTENSITY[type] || 'Naar eigen inschatting'}${guide ? ` · Doeltempo ${guide}` : ''}`,
       coachNote: `${TYPE_TEXT[type] || 'Handmatig toegevoegde training.'} Zelf ingepland ter aanvulling op je vaste schema.`,
+      nutritionTip: NUTRITION_TIPS[type] || null,
       status: 'gepland', result: null,
     }));
   }
@@ -661,7 +851,10 @@ export default function App() {
     const bikeTime = bikeSpeed > 0 ? (dist.bike / bikeSpeed) * 3600 : 0;
     const runTime = dist.run * runPace;
     const transition = 300;
-    const total = swimTime + bikeTime + runTime + transition;
+    const paceBasedTotal = swimTime + bikeTime + runTime + transition;
+    const raceBased = getRaceBasedEstimate(weeks, mainGoal);
+    // Een recent wedstrijdresultaat is een betrouwbaardere voorspeller dan losse trainingspaces, dus die krijgt meer gewicht.
+    const total = raceBased ? (hasData ? raceBased.seconds * 0.65 + paceBasedTotal * 0.35 : raceBased.seconds) : paceBasedTotal;
     let statusLabel = null;
     if (mainGoal.ambition === 'target' && mainGoal.targetTime) {
       const targetSec = parseTargetTime(mainGoal.targetTime);
@@ -671,7 +864,7 @@ export default function App() {
         else statusLabel = 'actie nodig';
       }
     }
-    return { swimTime, bikeTime, runTime, transition, total, statusLabel, hasData };
+    return { swimTime, bikeTime, runTime, transition, total, statusLabel, hasData: hasData || Boolean(raceBased), raceBased };
   }, [weeks, mainGoal, totalWeeks, intake]);
 
   const recommendation = useMemo(() => {
@@ -684,6 +877,7 @@ export default function App() {
     else if (prediction.statusLabel === 'lichte achterstand') msg = 'Je ligt net iets achter op je doeltijd. Focus de komende weken op kwaliteit in je intervaltrainingen.';
     else if (prediction.statusLabel === 'actie nodig') msg = 'Er zit een grotere kloof tussen je verwachte tijd en je doeltijd. Overweeg extra kwaliteitstrainingen of het bijstellen van je doeltijd.';
     else msg = 'Mooi bezig — blijf resultaten invullen zodat de voorspelling scherper wordt.';
+    if (prediction.raceBased) msg += ` Deze inschatting houdt rekening met je wedstrijdresultaat van ${prediction.raceBased.sourceName} (${fmtDate(prediction.raceBased.sourceDate)}).`;
     if (skippedCount >= 2) msg += ` Je hebt afgelopen week ${skippedCount} trainingen overgeslagen — geef volgende week de kernsessies (interval en lange training) voorrang.`;
     return msg;
   }, [prediction, weeks]);
@@ -931,7 +1125,7 @@ export default function App() {
   }
 
   /* --------------------------- shared: session card --------------------------- */
-  function SessionCard({ session, week, compact }) {
+  function SessionCard({ session, week, compact, dragId, dragOverDay, onDragHandleDown }) {
     const meta = DISCIPLINE_META[session.discipline];
     const Icon = meta.icon;
     const st = STATUS_META[session.status];
@@ -947,6 +1141,7 @@ export default function App() {
     const [raceName, setRaceName] = useState('');
     const [raceTypeKey, setRaceTypeKey] = useState('sprint');
     const [raceManualAmount, setRaceManualAmount] = useState('');
+    const [racePriority, setRacePriority] = useState('A');
 
     function chooseAddDiscipline(d) {
       setAddDiscipline(d);
@@ -970,12 +1165,17 @@ export default function App() {
       } else {
         target = { amount: rt.totalKm, unit: 'km', label: `${rt.label} (${rt.totalKm} km totaal)` };
       }
-      addRaceToDay(week.id, session.id, raceName.trim(), rt.label, target);
+      addRaceToDay(week.id, session.id, raceName.trim(), rt.label, target, racePriority);
       setAddingRace(false); setRaceName(''); setRaceManualAmount('');
     }
 
     return (
-      <div className="tri-card" style={{ marginBottom: 10, ...(isRace ? { border: `1.5px solid ${meta.color}`, background: `${meta.color}0D` } : {}) }}>
+      <div data-day={session.day} className="tri-card" style={{
+        marginBottom: 10,
+        ...(isRace ? { border: `1.5px solid ${meta.color}`, background: `${meta.color}0D` } : {}),
+        ...(dragId === session.id ? { opacity: 0.4 } : {}),
+        ...(dragOverDay === session.day && dragId != null && dragId !== session.id ? { border: '2px dashed var(--terracotta)' } : {}),
+      }}>
         <div style={{ display: 'flex', gap: 12 }}>
           <div className="tri-icon-circle" style={{ background: meta.color + '20' }}>
             <Icon size={20} color={meta.color} />
@@ -988,12 +1188,30 @@ export default function App() {
                   {isRace ? (session.raceName || meta.label) : meta.label}{isTraining ? ` · ${session.type}` : ''}
                 </div>
               </div>
-              <span className="tri-badge" style={{ background: st.bg, color: st.color, flexShrink: 0 }}>{st.label}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <span className="tri-badge" style={{ background: st.bg, color: st.color }}>{st.label}</span>
+                {isTraining && onDragHandleDown && (
+                  <button aria-label="Versleep naar andere dag" style={{ background: 'none', border: 'none', padding: 6, cursor: 'grab', touchAction: 'none', color: 'var(--muted)' }}
+                    onPointerDown={() => onDragHandleDown(session.id)}>
+                    <GripVertical size={18} />
+                  </button>
+                )}
+              </div>
             </div>
             {isTraining && session.target && (
               <div style={{ fontSize: 14, marginTop: 4 }}><b>{session.target.label}</b> · {session.intensity}</div>
             )}
+            {isRace && session.priority && (
+              <span className="tri-badge" style={{ marginTop: 6, display: 'inline-block', background: `${meta.color}1F`, color: meta.color }}>
+                {{ A: 'Hoofddoel (A)', B: 'Opbouwwedstrijd (B)', C: 'Trainingswedstrijd (C)' }[session.priority]}
+              </span>
+            )}
             {!compact && <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 6, marginBottom: 0 }}>{session.coachNote}</p>}
+            {!compact && session.nutritionTip && (
+              <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, marginBottom: 0, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                <Utensils size={13} style={{ flexShrink: 0, marginTop: 1 }} /><span>{session.nutritionTip}</span>
+              </p>
+            )}
 
             {isTraining && !compact && !confirmDelete && (
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
@@ -1047,6 +1265,20 @@ export default function App() {
                   <select className="tri-select" value={raceTypeKey} onChange={(e) => setRaceTypeKey(e.target.value)}>
                     {RACE_ADD_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
                   </select>
+                </div>
+                <div className="tri-field">
+                  <label className="tri-label">Prioriteit</label>
+                  <div className="tri-row">
+                    {[{ v: 'A', l: 'A · hoofddoel' }, { v: 'B', l: 'B · opbouw' }, { v: 'C', l: 'C · training' }].map((p) => (
+                      <button key={p.v} className={`tri-choice ${racePriority === p.v ? 'selected' : ''}`} style={{ fontSize: 12, padding: '10px 6px' }}
+                        onClick={() => setRacePriority(p.v)}>{p.l}</button>
+                    ))}
+                  </div>
+                  <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6, marginBottom: 0 }}>
+                    {racePriority === 'A' && 'Volledige taper: de dag ervoor én erna worden automatisch rustdagen.'}
+                    {racePriority === 'B' && 'Lichte taper: alleen de dag ervoor wordt verzacht.'}
+                    {racePriority === 'C' && 'Geen automatische aanpassing — puur een trainingswedstrijd.'}
+                  </p>
                 </div>
                 {RACE_ADD_TYPES.find((t) => t.key === raceTypeKey).manual ? (
                   <div className="tri-field">
@@ -1179,7 +1411,14 @@ export default function App() {
         <div className="tri-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <h3 style={{ fontSize: 16 }}>Subdoelen</h3>
-            <Flag size={18} color="var(--terracotta)" />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {subGoals.some((sg) => sg.status === 'achieved') && (
+                <span className="tri-badge" style={{ background: 'var(--success-bg)', color: 'var(--success)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <Medal size={13} /> {subGoals.filter((sg) => sg.status === 'achieved').length}
+                </span>
+              )}
+              <Flag size={18} color="var(--terracotta)" />
+            </div>
           </div>
           {subGoals.length === 0 && <p style={{ fontSize: 14, color: 'var(--muted)' }}>Nog geen subdoelen toegevoegd.</p>}
           {subGoals.map((sg) => {
@@ -1187,11 +1426,13 @@ export default function App() {
             const order = ['not_started', 'in_progress', 'achieved'];
             const labelMap = { not_started: 'Nog niet gestart', in_progress: 'Bezig', achieved: 'Behaald' };
             return (
-              <div key={sg.id} style={{ marginBottom: 14 }}>
+              <div key={sg.id} style={{ marginBottom: 14, ...(sg.status === 'achieved' ? { background: 'var(--success-bg)', borderRadius: 12, padding: 10 } : {}) }}>
                 <div className="tri-subgoal-row">
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>{sg.text}</div>
+                  <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {sg.status === 'achieved' && <Medal size={15} color="var(--success)" />} {sg.text}
+                  </div>
                   <button className="tri-pill" style={{
-                    background: sg.status === 'achieved' ? 'var(--success-bg)' : sg.status === 'in_progress' ? '#F6E3C0' : 'var(--sand)',
+                    background: sg.status === 'achieved' ? '#fff' : sg.status === 'in_progress' ? '#F6E3C0' : 'var(--sand)',
                     color: sg.status === 'achieved' ? 'var(--success)' : sg.status === 'in_progress' ? 'var(--warning)' : 'var(--muted)',
                   }} onClick={() => setSubGoals((sgs) => sgs.map((x) => x.id === sg.id ? { ...x, status: order[(order.indexOf(x.status) + 1) % order.length] } : x))}>
                     {sg.status === 'achieved' && <Check size={13} />} {labelMap[sg.status]}
@@ -1219,6 +1460,34 @@ export default function App() {
   /* --------------------------- Schedule tab --------------------------- */
   function ScheduleTab() {
     const [regenConfirm, setRegenConfirm] = useState(false);
+    const [dragId, setDragId] = useState(null);
+    const [dragOverDay, setDragOverDay] = useState(null);
+    const dragOverDayRef = useRef(null);
+    useEffect(() => { dragOverDayRef.current = dragOverDay; }, [dragOverDay]);
+    useEffect(() => {
+      if (dragId == null || !currentWeek) return;
+      function handleMove(e) {
+        const point = e.touches ? e.touches[0] : e;
+        const el = document.elementFromPoint(point.clientX, point.clientY);
+        const cardEl = el && el.closest('[data-day]');
+        setDragOverDay(cardEl ? Number(cardEl.getAttribute('data-day')) : null);
+      }
+      function handleUp() {
+        const overDay = dragOverDayRef.current;
+        if (overDay != null) {
+          const session = currentWeek.sessions.find((s) => s.id === dragId);
+          if (session && session.day !== overDay) swapDays(currentWeek.id, dragId, overDay);
+        }
+        setDragId(null);
+        setDragOverDay(null);
+      }
+      window.addEventListener('pointermove', handleMove);
+      window.addEventListener('pointerup', handleUp);
+      return () => {
+        window.removeEventListener('pointermove', handleMove);
+        window.removeEventListener('pointerup', handleUp);
+      };
+    }, [dragId, currentWeek]);
     if (!currentWeek) return null;
     const trainCount = currentWeek.sessions.filter((s) => s.discipline !== 'rust').length;
     const doneCount = currentWeek.sessions.filter((s) => s.discipline !== 'rust' && (s.status === 'voltooid' || s.status === 'aangepast')).length;
@@ -1260,7 +1529,10 @@ export default function App() {
           )}
         </div>
 
-        {currentWeek.sessions.map((s) => <SessionCard key={s.id} session={s} week={currentWeek} />)}
+        {currentWeek.sessions.map((s) => (
+          <SessionCard key={s.id} session={s} week={currentWeek}
+            dragId={dragId} dragOverDay={dragOverDay} onDragHandleDown={setDragId} />
+        ))}
 
         {isLast && (
           <button className="tri-btn tri-btn-primary tri-btn-block" onClick={generateNextWeek}>
@@ -1379,6 +1651,72 @@ export default function App() {
             </div>
           )
         ))}
+      </div>
+    );
+  }
+
+  /* --------------------------- Import panel (Strava/Garmin/etc. CSV) --------------------------- */
+  function ImportPanel() {
+    const [matches, setMatches] = useState(null);
+    const [selected, setSelected] = useState({});
+    const [fileName, setFileName] = useState('');
+    const [error, setError] = useState('');
+    const [imported, setImported] = useState(false);
+
+    function handleFile(e) {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      setFileName(file.name); setError(''); setImported(false);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const activities = parseActivitiesCsv(String(reader.result));
+        if (!activities.length) { setError('Kon geen activiteiten herkennen in dit bestand. Exporteer als CSV vanuit Strava ("Bulk export") of Garmin Connect.'); setMatches(null); return; }
+        const found = matchImportedActivities(weeks, activities);
+        setMatches(found);
+        setSelected(Object.fromEntries(found.map((m, i) => [i, true])));
+      };
+      reader.readAsText(file);
+    }
+
+    function doImport() {
+      const toApply = matches.filter((_, i) => selected[i]);
+      applyImportedMatches(toApply);
+      setImported(true);
+    }
+
+    return (
+      <div style={{ borderTop: '1px solid var(--sand)', marginTop: 14, paddingTop: 14 }}>
+        <h3 style={{ fontSize: 15, marginTop: 0, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 6 }}><Upload size={15} /> Activiteiten importeren</h3>
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>
+          Upload een CSV-export van Strava, Garmin Connect of Apple Health (via een export-app) om automatisch resultaten in te vullen bij passende geplande trainingen.
+        </p>
+        <input type="file" accept=".csv,text/csv" onChange={handleFile} className="tri-input" style={{ padding: 10 }} />
+        {error && <p style={{ fontSize: 12, color: 'var(--danger)', marginTop: 8 }}>{error}</p>}
+        {matches && matches.length === 0 && !error && (
+          <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 10 }}>Geen activiteiten in "{fileName}" pasten bij een geplande training (zelfde discipline, binnen 1 dag).</p>
+        )}
+        {matches && matches.length > 0 && !imported && (
+          <div style={{ marginTop: 10 }}>
+            <p style={{ fontSize: 13, marginBottom: 8 }}>{matches.length} activiteit(en) gevonden die passen bij geplande trainingen:</p>
+            {matches.map((m, i) => {
+              const meta = DISCIPLINE_META[m.session.discipline];
+              return (
+                <label key={i} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--sand)' }}>
+                  <input type="checkbox" checked={!!selected[i]} onChange={(e) => setSelected((s) => ({ ...s, [i]: e.target.checked }))} style={{ width: 18, height: 18 }} />
+                  <meta.icon size={16} color={meta.color} />
+                  <div style={{ flex: 1, fontSize: 13 }}>
+                    <b>{meta.label} · {m.session.type}</b> op {fmtDate(m.sessionDate)}
+                    <div style={{ color: 'var(--muted)' }}>{m.activity.distanceKm ? `${Math.round(m.activity.distanceKm * 100) / 100} km` : ''}{m.activity.durationSec ? ` · ${secToHMS(m.activity.durationSec)}` : ''}{m.activity.name ? ` · ${m.activity.name}` : ''}</div>
+                  </div>
+                </label>
+              );
+            })}
+            <button className="tri-btn tri-btn-primary tri-btn-block" style={{ marginTop: 12 }} onClick={doImport}>
+              {Object.values(selected).filter(Boolean).length} activiteit(en) importeren
+            </button>
+          </div>
+        )}
+        {imported && <p style={{ fontSize: 13, color: 'var(--success)', marginTop: 10 }}><Check size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />Geïmporteerd — bekijk de resultaten in Resultaten of Voortgang.</p>}
       </div>
     );
   }
@@ -1526,9 +1864,11 @@ export default function App() {
       return { week: `W${w.weekNumber}`, hr: avg };
     }).filter((d) => d.hr != null);
 
+    const blockComparison = computeBlockComparison(weeks);
+
     const subtabs = [
       { key: 'tempo', label: 'Tempo' }, { key: 'volume', label: 'Volume' },
-      { key: 'hr', label: 'Hartslag' }, { key: 'voorspelling', label: 'Voorspelling' },
+      { key: 'hr', label: 'Hartslag' }, { key: 'blok', label: 'Vorig blok' }, { key: 'voorspelling', label: 'Voorspelling' },
     ];
 
     return (
@@ -1600,6 +1940,40 @@ export default function App() {
                 </LineChart>
               </ResponsiveContainer>
             ) : <p style={{ fontSize: 14, color: 'var(--muted)' }}>Nog geen hartslagdata ingevuld.</p>}
+          </div>
+        )}
+
+        {progressSubTab === 'blok' && (
+          <div className="tri-card">
+            <h3 style={{ fontSize: 15, marginBottom: 4 }}>Dit blok vs. vorig blok</h3>
+            {blockComparison ? (
+              <>
+                <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>{blockComparison.prior.label} vergeleken met {blockComparison.recent.label}</p>
+                {[
+                  { label: 'Totaal volume', unit: 'km', prior: blockComparison.prior.totalKm, recent: blockComparison.recent.totalKm, higherIsBetter: true },
+                  { label: 'Voltooiingspercentage', unit: '%', prior: blockComparison.prior.completionPct, recent: blockComparison.recent.completionPct, higherIsBetter: true },
+                  { label: 'Gemiddelde RPE', unit: '', prior: blockComparison.prior.avgRpe, recent: blockComparison.recent.avgRpe, higherIsBetter: false },
+                ].map((row) => {
+                  if (row.prior == null || row.recent == null) return null;
+                  const improved = row.higherIsBetter ? row.recent >= row.prior : row.recent <= row.prior;
+                  const diff = Math.round((row.recent - row.prior) * 10) / 10;
+                  return (
+                    <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid var(--sand)' }}>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{row.label}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 12, color: 'var(--muted)' }}>{row.prior}{row.unit} → </span>
+                        <span style={{ fontFamily: 'Fraunces, serif', fontWeight: 700 }}>{row.recent}{row.unit}</span>
+                        <span className="tri-badge" style={{ background: improved ? 'var(--success-bg)' : '#F7DAD3', color: improved ? 'var(--success)' : 'var(--danger)' }}>
+                          {diff > 0 ? '+' : ''}{diff}{row.unit}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            ) : (
+              <p style={{ fontSize: 14, color: 'var(--muted)' }}>Nog niet genoeg weken om een vorig blok mee te vergelijken — dit verschijnt zodra je minstens twee blokken van elk enkele weken hebt afgerond.</p>
+            )}
           </div>
         )}
 
@@ -1782,6 +2156,8 @@ export default function App() {
                 <Trash2 size={16} style={{ verticalAlign: 'middle', marginRight: 6 }} />Alle data wissen
               </button>
             </div>
+
+            <ImportPanel />
 
             <button className="tri-btn tri-btn-primary tri-btn-block" style={{ marginTop: 10 }} onClick={() => setShowSettings(false)}>Klaar</button>
           </div>
