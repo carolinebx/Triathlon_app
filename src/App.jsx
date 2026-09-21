@@ -8,7 +8,7 @@ import {
   Waves, Bike, Footprints, Dumbbell, Moon, ChevronLeft, ChevronRight, Plus, X,
   Check, TrendingUp, Award, Calendar, Target, ArrowLeftRight, Flag, Sparkles,
   AlertTriangle, Edit3, Trash2, Settings, Grid3x3, RefreshCw, GripVertical,
-  Utensils, Upload, Medal,
+  Utensils, Upload, Medal, Sun,
 } from 'lucide-react';
 
 /* ============================== CONSTANTS ============================== */
@@ -280,6 +280,59 @@ function weekMonthLabel(startDate) {
   return new Date(startDate).toLocaleDateString('nl-NL', { month: 'long', year: 'numeric' });
 }
 
+/* ------------------------------ vakanties ------------------------------ */
+// Een vakantie is een periode waarin niet (of alleen licht) getraind kan worden.
+// mode 'rust' = helemaal geen training, mode 'licht' = kortere, rustige sessies in de
+// sporten die op je bestemming mogelijk zijn.
+const HOLIDAY_MODE_LABEL = { rust: 'Geen training', licht: 'Licht trainen' };
+const HOLIDAY_LIGHT_FACTOR = 0.6; // lichte vakantiesessies zijn ~60% van de normale omvang
+const HOLIDAY_DISCIPLINES = ['zwemmen', 'fietsen', 'hardlopen', 'kracht'];
+
+function holidayForDate(date, holidays) {
+  if (!holidays || !holidays.length) return null;
+  const key = dateKey(date);
+  return holidays.find((h) => h.from && h.to && key >= h.from && key <= h.to) || null;
+}
+
+function holidayAllowsDiscipline(holiday, discipline) {
+  if (!holiday || holiday.mode === 'rust') return false;
+  const allowed = holiday.disciplines && holiday.disciplines.length ? holiday.disciplines : HOLIDAY_DISCIPLINES;
+  return allowed.includes(discipline);
+}
+
+function weekHolidayInfo(startDate, holidays) {
+  const days = Array.from({ length: 7 }, (_, d) => holidayForDate(addDays(new Date(startDate), d), holidays));
+  const restDays = days.filter((h) => h && h.mode === 'rust').length;
+  const lightDays = days.filter((h) => h && h.mode === 'licht').length;
+  const names = [...new Set(days.filter(Boolean).map((h) => h.label || 'Vakantie'))];
+  return { days, restDays, lightDays, names, active: restDays + lightDays > 0 };
+}
+
+function softTypeFor(discipline) {
+  if (discipline === 'zwemmen') return 'techniek';
+  if (discipline === 'hardlopen') return 'herstel';
+  if (discipline === 'kracht') return 'mobiliteit';
+  return 'duurloop';
+}
+
+function scaleTarget(target, factor) {
+  if (!target) return null;
+  if (target.unit === 'm') {
+    const amount = Math.max(Math.round((target.amount * factor) / 50) * 50, 200);
+    return { amount, unit: 'm', label: `${amount} m` };
+  }
+  const amount = Math.max(Math.round(target.amount * factor * 10) / 10, target.unit === 'min' ? 15 : 1);
+  return { amount, unit: target.unit, label: `${amount} ${target.unit}` };
+}
+
+function holidayRangeLabel(h) {
+  if (!h || !h.from || !h.to) return '';
+  const a = new Date(`${h.from}T00:00:00`);
+  const b = new Date(`${h.to}T00:00:00`);
+  const days = Math.round((b - a) / 86400000) + 1;
+  return `${fmtDayMonth(a)} – ${fmtDayMonth(b)} (${days} ${days === 1 ? 'dag' : 'dagen'})`;
+}
+
 function paceGuidance(discipline, type, intake) {
   if (discipline === 'zwemmen') {
     const base = paceStrToSec(intake.swim.pace);
@@ -306,6 +359,12 @@ function paceGuidance(discipline, type, intake) {
 
 function computeAdaptation(prevWeek) {
   if (!prevWeek) return { factor: 1, note: 'Eerste week — gebaseerd op je intake.' };
+  if (prevWeek.holiday && prevWeek.holiday.restDays >= 4) {
+    return { factor: 0.9, note: `Je komt terug van vakantie (${prevWeek.holiday.names.join(', ')}) — we pakken het volume rustig weer op in plaats van meteen door te bouwen.` };
+  }
+  if (prevWeek.holiday && prevWeek.holiday.restDays + prevWeek.holiday.lightDays >= 4) {
+    return { factor: 0.95, note: 'Vorige week stond in het teken van je vakantie — we bouwen voorzichtig verder.' };
+  }
   const trainSessions = prevWeek.sessions.filter((s) => s.discipline !== 'rust');
   const completed = trainSessions.filter((s) => s.status === 'voltooid' || s.status === 'aangepast');
   const completionRate = trainSessions.length ? completed.length / trainSessions.length : 1;
@@ -342,7 +401,9 @@ function computeGoalWeeklyPeak(discipline, raceType, baseWeekly, expCap) {
   return { peak, requiredWeekly, ambitious: requiredWeekly > safeCeiling };
 }
 
-function computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, adaptFactor, isDeload, prevWeek) {
+// refWeek is de laatste 'normale' week (dus niet een vakantieweek): daaraan meten we
+// af hoe snel het volume mag stijgen, zodat een vakantie de opbouw niet blijvend afknijpt.
+function computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, adaptFactor, isDeload, refWeek) {
   const bases = { zwemmen: intake.swim.volumeKm, fietsen: intake.bike.volumeKm, hardlopen: intake.run.volumeKm };
   const manualTargets = { zwemmen: intake.swim.targetVolumeKm, fietsen: intake.bike.targetVolumeKm, hardlopen: intake.run.targetVolumeKm };
   const exps = { zwemmen: intake.swim.experience, fietsen: intake.bike.experience, hardlopen: intake.run.experience };
@@ -367,8 +428,8 @@ function computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, a
     }
     if (isDeload) vol *= 0.7;
     vol *= Math.min(Math.max(adaptFactor, 0.85), 1.12); // resultaten sturen licht bij, de doelcurve blijft leidend
-    if (prevWeek && phase !== 'taper' && !isDeload) {
-      const prevVol = sumDisciplineVolumeKm(prevWeek, disc);
+    if (refWeek && phase !== 'taper' && !isDeload) {
+      const prevVol = sumDisciplineVolumeKm(refWeek, disc);
       if (prevVol > 0.5) vol = Math.min(vol, prevVol * 1.15); // nooit meer dan ~15% erbij t.o.v. vorige week
     }
     if (disc === 'hardlopen' && (intake.injuries || '').trim()) vol *= 0.85;
@@ -414,8 +475,9 @@ const QUALITY_ROTATION = {
   hardlopen: ['interval', 'fartlek', 'heuveltraining'],
 };
 
-function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWeeks, defaultDays) {
+function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWeeks, defaultDays, holidays = [], refWeek = prevWeek) {
   const { factor: adaptFactor, note: baseAdaptNote } = computeAdaptation(prevWeek);
+  const hol = weekHolidayInfo(startDate, holidays);
   // Weeknummers lopen door over alle doelen heen (zodat geschiedenis en grafieken kloppen);
   // fase, volumeopbouw en hersteweken tellen vanaf de start van het huidige doel.
   const goalWeek = weekNumber - ((mainGoal.startWeek || 1) - 1);
@@ -428,7 +490,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
   const daysPerWeek = Math.min(Math.max(intake.daysPerWeek, 3), 6);
   const template = TEMPLATES[daysPerWeek];
   const dayIdx = buildDayAssignments(template, defaultDays);
-  const weeklyVolumes = computeWeeklyVolumes(intake, mainGoal, phase, goalWeek, totalWeeks, adaptFactor, isDeload, prevWeek);
+  const weeklyVolumes = computeWeeklyVolumes(intake, mainGoal, phase, goalWeek, totalWeeks, adaptFactor, isDeload, refWeek);
 
   const counts = {};
   template.forEach((d) => { counts[d] = (counts[d] || 0) + 1; });
@@ -497,7 +559,50 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
     prevHardness = HARDNESS[type] ?? 1;
   }
 
-  return { id: uid('w'), weekNumber, startDate: startDate.toISOString(), phase, isDeload, adaptFactor, adaptNote, weeklyVolumeMeta: weeklyVolumes.__meta, sessions: daySessions };
+  // Step 4: leg de vakantie over de week heen — rustdagen worden echt rust, en op lichte
+  // dagen blijft alleen wat op je bestemming kan, korter en rustiger. Sessies in een sport
+  // die daar niet kan vervallen (ze worden niet naar een andere sport verplaatst, want dan
+  // zou je vakantieweek juist zwaarder worden dan een normale week).
+  const finalSessions = daySessions.map((s, d) => {
+    const h = hol.days[d];
+    if (!h) return s;
+    const name = h.label || 'Vakantie';
+    if (s.discipline === 'rust') {
+      return { ...s, holidayName: name, coachNote: `Vakantie (${name}): rustdag, zoals gepland.` };
+    }
+    if (h.mode === 'rust') {
+      return {
+        ...s, discipline: 'rust', type: 'rust', target: null, intensity: INTENSITY.rust,
+        coachNote: `Vakantie (${name}): geen training ingepland. Rust of wat losse beweging is hier het beste — na je vakantie pakken we de opbouw rustig weer op.`,
+        nutritionTip: null, holidayName: name, status: 'gepland', result: null,
+      };
+    }
+    if (!holidayAllowsDiscipline(h, s.discipline)) {
+      return {
+        ...s, discipline: 'rust', type: 'rust', target: null, intensity: INTENSITY.rust,
+        coachNote: `Vakantie (${name}): ${DISCIPLINE_META[s.discipline].label.toLowerCase()} kan hier niet, dus dit wordt een rustdag. Wat je wél kunt doen staat op de andere dagen van deze week.`,
+        nutritionTip: null, holidayName: name, status: 'gepland', result: null,
+      };
+    }
+    const type = (HARDNESS[s.type] ?? 1) >= 2 ? softTypeFor(s.discipline) : s.type;
+    const target = scaleTarget(s.target, HOLIDAY_LIGHT_FACTOR);
+    const guide = paceGuidance(s.discipline, type, intake);
+    return {
+      ...s, type, target,
+      intensity: `${INTENSITY[type] || 'Naar eigen inschatting'}${guide ? ` · Doeltempo ${guide}` : ''}`,
+      coachNote: `Vakantie (${name}): een kortere, rustige sessie zodat je je ritme houdt zonder je vakantie te laten overheersen. ${TYPE_TEXT[type] || ''}`,
+      nutritionTip: NUTRITION_TIPS[type] || null,
+      holidayName: name,
+      status: 'gepland', result: null,
+    };
+  });
+
+  return {
+    id: uid('w'), weekNumber, startDate: startDate.toISOString(), phase, isDeload, adaptFactor, adaptNote,
+    weeklyVolumeMeta: weeklyVolumes.__meta,
+    holiday: hol.active ? { names: hol.names, restDays: hol.restDays, lightDays: hol.lightDays } : null,
+    sessions: finalSessions,
+  };
 }
 
 function linreg(points) {
@@ -677,6 +782,7 @@ export default function App() {
   const [mainGoal, setMainGoal] = useState({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
   const [subGoals, setSubGoals] = useState([]);
   const [pastGoals, setPastGoals] = useState([]);
+  const [holidays, setHolidays] = useState([]);
   const [ngStep, setNgStep] = useState(0);
   const [ngDraft, setNgDraft] = useState({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
   const [ngFinishTime, setNgFinishTime] = useState('');
@@ -724,6 +830,7 @@ export default function App() {
       if (data.mainGoal) setMainGoal(data.mainGoal);
       if (data.subGoals) setSubGoals(data.subGoals);
       if (data.pastGoals) setPastGoals(data.pastGoals);
+      if (data.holidays) setHolidays(data.holidays);
       if (data.intake) setIntake(data.intake);
       if (data.weeks) setWeeks(data.weeks);
       if (data.totalWeeks) setTotalWeeks(data.totalWeeks);
@@ -736,7 +843,7 @@ export default function App() {
   // Autosave (debounced): always to this device instantly, and to Google Sheets when configured
   useEffect(() => {
     if (!loaded) return;
-    const snapshot = { stage: stage === 'newgoal' ? 'app' : stage, mainGoal, subGoals, pastGoals, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex };
+    const snapshot = { stage: stage === 'newgoal' ? 'app' : stage, mainGoal, subGoals, pastGoals, holidays, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex };
     saveLocal(snapshot);
     if (!hasRemote()) { setSyncStatus('local-only'); return; }
     setSyncStatus('saving');
@@ -745,24 +852,69 @@ export default function App() {
       setSyncStatus(ok ? 'saved' : 'error');
     }, 900);
     return () => clearTimeout(t);
-  }, [loaded, stage, mainGoal, subGoals, pastGoals, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex]);
+  }, [loaded, stage, mainGoal, subGoals, pastGoals, holidays, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex]);
 
   function resetAllData() {
     saveLocal(null);
     if (hasRemote()) saveRemote({});
     setStage('onboarding'); setObStep(0);
     setMainGoal({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
-    setSubGoals([]); setPastGoals([]); setWeeks([]); setTotalWeeks(12); setCurrentWeekIndex(0); setResultsWeekIndex(0);
+    setSubGoals([]); setPastGoals([]); setHolidays([]); setWeeks([]); setTotalWeeks(12); setCurrentWeekIndex(0); setResultsWeekIndex(0);
     setDefaultDays({ zwemmen: [], fietsen: [], hardlopen: [], kracht: [] });
     setShowSettings(false);
   }
 
   const currentWeek = weeks[currentWeekIndex];
 
+  // De laatste week zonder (grotendeels) vakantie: die gebruiken we als ijkpunt voor de
+  // volumeopbouw, zodat een vakantieweek de rest van het plan niet naar beneden trekt.
+  function volumeRefWeek(list) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const h = list[i].holiday;
+      if (!h || h.restDays + h.lightDays < 3) return list[i];
+    }
+    return null;
+  }
+
+  function weekHasInput(w) {
+    return w.sessions.some((s) => s.status !== 'gepland' || s.result);
+  }
+
+  // Na het toevoegen of verwijderen van een vakantie: alle nog niet begonnen toekomstige
+  // weken opnieuw opbouwen, zodat de vakantie meteen in je planning zichtbaar is.
+  function rebuildFutureWeeks(nextHolidays) {
+    const thisMonday = startOfWeek(new Date()); thisMonday.setHours(0, 0, 0, 0);
+    setWeeks((ws) => {
+      const out = [...ws];
+      let changed = false;
+      for (let i = 0; i < out.length; i++) {
+        const start = new Date(out[i].startDate); start.setHours(0, 0, 0, 0);
+        if (start < thisMonday || weekHasInput(out[i])) continue;
+        const prev = i > 0 ? out[i - 1] : null;
+        const fresh = generateWeek(out[i].weekNumber, new Date(out[i].startDate), intake, mainGoal, prev, totalWeeks, defaultDays, nextHolidays, volumeRefWeek(out.slice(0, i)));
+        out[i] = { ...fresh, id: out[i].id };
+        changed = true;
+      }
+      return changed ? out : ws;
+    });
+  }
+
+  function saveHoliday(holiday) {
+    const next = [...holidays.filter((h) => h.id !== holiday.id), holiday].sort((a, b) => (a.from < b.from ? -1 : 1));
+    setHolidays(next);
+    rebuildFutureWeeks(next);
+  }
+
+  function removeHoliday(id) {
+    const next = holidays.filter((h) => h.id !== id);
+    setHolidays(next);
+    rebuildFutureWeeks(next);
+  }
+
   function finishOnboarding() {
     const tw = weeksUntil(mainGoal.raceDate);
     setTotalWeeks(tw);
-    const week1 = generateWeek(1, startOfWeek(new Date()), intake, mainGoal, null, tw, defaultDays);
+    const week1 = generateWeek(1, startOfWeek(new Date()), intake, mainGoal, null, tw, defaultDays, holidays, null);
     setWeeks([week1]);
     setCurrentWeekIndex(0);
     setResultsWeekIndex(0);
@@ -773,7 +925,7 @@ export default function App() {
     const prev = weeks[weeks.length - 1];
     const nextNum = prev.weekNumber + 1;
     const nextStart = addDays(new Date(prev.startDate), 7);
-    const nextWeek = generateWeek(nextNum, nextStart, intake, mainGoal, prev, totalWeeks, defaultDays);
+    const nextWeek = generateWeek(nextNum, nextStart, intake, mainGoal, prev, totalWeeks, defaultDays, holidays, volumeRefWeek(weeks));
     setWeeks((w) => [...w, nextWeek]);
     setCurrentWeekIndex(weeks.length);
     setResultsWeekIndex(weeks.length);
@@ -817,7 +969,7 @@ export default function App() {
       run: { ...intake.run, targetVolumeKm: null },
     };
 
-    const firstWeek = generateWeek(startWeek, nextStart, nextIntake, newGoal, last || null, tw, defaultDays);
+    const firstWeek = generateWeek(startWeek, nextStart, nextIntake, newGoal, last || null, tw, defaultDays, holidays, volumeRefWeek(weeks));
     setPastGoals((pg) => [...pg, archived]);
     setSubGoals(carriedSubGoals);
     setMainGoal(newGoal);
@@ -834,7 +986,7 @@ export default function App() {
     setWeeks((ws) => {
       const week = ws[weekIndex];
       const prevWeek = weekIndex > 0 ? ws[weekIndex - 1] : null;
-      const fresh = generateWeek(week.weekNumber, new Date(week.startDate), intake, mainGoal, prevWeek, totalWeeks, defaultDays);
+      const fresh = generateWeek(week.weekNumber, new Date(week.startDate), intake, mainGoal, prevWeek, totalWeeks, defaultDays, holidays, volumeRefWeek(ws.slice(0, weekIndex)));
       return ws.map((w, i) => (i === weekIndex ? { ...fresh, id: w.id } : w));
     });
   }
@@ -992,6 +1144,29 @@ export default function App() {
 
   const daysToRace = mainGoal.raceDate ? daysBetween(mainGoal.raceDate, new Date()) : null;
   const goalPassed = Boolean(mainGoal.raceDate) && mainGoal.raceDate < dateKey(new Date());
+
+  // Wat betekenen de ingeplande vakanties voor de weg naar je wedstrijd?
+  const holidayOutlook = useMemo(() => {
+    const todayKey = dateKey(new Date());
+    const upcoming = holidays.filter((h) => h.to >= todayKey).sort((a, b) => (a.from < b.from ? -1 : 1));
+    if (!mainGoal.raceDate || goalPassed) return { upcoming, weeksToRace: 0, restWeeks: 0, lightWeeks: 0, effectiveWeeks: 0, taperOverlap: [] };
+    const race = new Date(`${mainGoal.raceDate}T00:00:00`);
+    let cursor = startOfWeek(new Date()); cursor.setHours(0, 0, 0, 0);
+    let weeksToRace = 0, restWeeks = 0, lightWeeks = 0;
+    while (cursor <= race && weeksToRace < 120) {
+      const info = weekHolidayInfo(cursor, holidays);
+      weeksToRace++;
+      if (info.restDays >= 4) restWeeks++;
+      else if (info.restDays + info.lightDays >= 3) lightWeeks++;
+      cursor = addDays(cursor, 7);
+    }
+    // Een vakantie in de laatste weken voor de wedstrijd raakt je piek- en taperfase.
+    const taperWeeks = TAPER_WEEKS[mainGoal.raceType] ?? 2;
+    const sharpStart = dateKey(addDays(race, -7 * (taperWeeks + 2)));
+    const taperOverlap = upcoming.filter((h) => h.mode === 'rust' && h.to >= sharpStart && h.from <= mainGoal.raceDate);
+    return { upcoming, weeksToRace, restWeeks, lightWeeks, effectiveWeeks: weeksToRace - restWeeks, taperOverlap };
+  }, [holidays, mainGoal.raceDate, mainGoal.raceType, goalPassed]);
+
   const weeksElapsed = Math.max(weeks.length - (goalStartWeek - 1), 0);
   const dialPct = goalPassed ? 1 : totalWeeks ? Math.min(weeksElapsed / totalWeeks, 1) : 0;
 
@@ -1432,6 +1607,11 @@ export default function App() {
             {isTraining && session.target && (
               <div style={{ fontSize: 14, marginTop: 4 }}><b>{session.target.label}</b> · {session.intensity}</div>
             )}
+            {session.holidayName && (
+              <span className="tri-badge" style={{ marginTop: 6, marginRight: 6, display: 'inline-flex', alignItems: 'center', gap: 4, background: '#E4EACB', color: 'var(--success)' }}>
+                <Sun size={12} />{session.holidayName}
+              </span>
+            )}
             {isRace && session.priority && (
               <span className="tri-badge" style={{ marginTop: 6, display: 'inline-block', background: `${meta.color}1F`, color: meta.color }}>
                 {{ A: 'Hoofddoel (A)', B: 'Opbouwwedstrijd (B)', C: 'Trainingswedstrijd (C)' }[session.priority]}
@@ -1697,6 +1877,47 @@ export default function App() {
           </div>
         </div>
 
+        <div className="tri-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <h3 style={{ fontSize: 16, display: 'flex', alignItems: 'center', gap: 7 }}><Sun size={17} color="var(--accent)" />Vakanties</h3>
+            <button className="tri-btn tri-btn-secondary" style={{ minHeight: 36, padding: '7px 12px', fontSize: 13 }} onClick={() => setShowSettings(true)}>
+              <Plus size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />Toevoegen
+            </button>
+          </div>
+          {holidayOutlook.upcoming.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>
+              Nog geen vakanties ingepland. Voeg ze toe en ik houd er rekening mee in je opbouw: die weken worden rust of licht, en daarna pakken we het volume rustig weer op.
+            </p>
+          ) : (
+            <>
+              {holidayOutlook.upcoming.map((h) => (
+                <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--sand)' }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{h.label || 'Vakantie'}</div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>{holidayRangeLabel(h)}</div>
+                  </div>
+                  <span className="tri-badge" style={{
+                    background: h.mode === 'rust' ? 'var(--sand)' : '#F6E3C0',
+                    color: h.mode === 'rust' ? 'var(--muted)' : 'var(--warning)', flexShrink: 0,
+                  }}>{HOLIDAY_MODE_LABEL[h.mode]}</span>
+                </div>
+              ))}
+              {mainGoal.raceDate && !goalPassed && (
+                <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 10, marginBottom: 0 }}>
+                  Van de {holidayOutlook.weeksToRace} weken tot je wedstrijd blijven er {holidayOutlook.effectiveWeeks} volwaardige trainingsweken over
+                  {holidayOutlook.lightWeeks > 0 ? `, waarvan ${holidayOutlook.lightWeeks} deels vakantie` : ''}. Daar is de opbouw op afgestemd.
+                </p>
+              )}
+              {holidayOutlook.taperOverlap.length > 0 && (
+                <p style={{ fontSize: 13, color: 'var(--warning)', marginTop: 8, marginBottom: 0, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                  <AlertTriangle size={15} style={{ flexShrink: 0, marginTop: 2 }} />
+                  <span>{holidayOutlook.taperOverlap.map((h) => h.label || 'Een vakantie').join(' en ')} valt in je scherpste weken vlak voor de wedstrijd. Overweeg daar licht te trainen in plaats van helemaal niets, of je wedstrijddatum te verschuiven.</span>
+                </p>
+              )}
+            </>
+          )}
+        </div>
+
         {pastGoals.length > 0 && (
           <div className="tri-card">
             <h3 style={{ fontSize: 16, marginBottom: 12 }}>Eerdere doelen</h3>
@@ -1776,6 +1997,11 @@ export default function App() {
           <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="tri-badge" style={{ background: '#FDEEE4', color: 'var(--terracotta)' }}>{PHASE_LABEL[currentWeek.phase]}</span>
             {currentWeek.isDeload && <span className="tri-badge" style={{ background: '#F6E3C0', color: 'var(--warning)' }}>Hersteweek</span>}
+            {currentWeek.holiday && (
+              <span className="tri-badge" style={{ background: '#E4EACB', color: 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Sun size={12} />{currentWeek.holiday.names.join(', ')}
+              </span>
+            )}
             <span style={{ fontSize: 12, color: 'var(--muted)' }}>{doneCount}/{trainCount} trainingen afgerond</span>
           </div>
           <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>{PHASE_TEXT[currentWeek.phase]}</p>
@@ -2070,7 +2296,9 @@ export default function App() {
               const isToday = key === todayKey;
               const isRace = key === raceKey;
               const meta = s ? DISCIPLINE_META[s.discipline] : null;
+              const hol = holidayForDate(d, holidays);
               let bg = 'transparent', border = '1px solid transparent';
+              if (hol) { bg = '#EDF1DC'; border = '1px dashed var(--success)'; }
               if (s) {
                 if (s.status === 'voltooid' || s.status === 'aangepast') bg = 'var(--success-bg)';
                 else if (s.status === 'overgeslagen') bg = '#F7DAD3';
@@ -2086,12 +2314,19 @@ export default function App() {
                 }}>
                   <span>{d.getDate()}</span>
                   {meta && <meta.icon size={10} color={meta.color} />}
+                  {!meta && hol && <Sun size={10} color="var(--accent)" />}
                   {isRace && <Flag size={9} color="var(--terracotta)" />}
                 </button>
               );
             })}
           </div>
         </div>
+
+        {holidays.length > 0 && (
+          <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Sun size={13} color="var(--accent)" /> Dagen met een gestippelde rand vallen in een vakantie.
+          </p>
+        )}
 
         {selected && (
           <div className="tri-card">
@@ -2292,6 +2527,108 @@ export default function App() {
     );
   }
 
+  /* --------------------------- Holiday panel (settings) --------------------------- */
+  function HolidayPanel() {
+    const todayKey = dateKey(new Date());
+    const [draft, setDraft] = useState({ label: '', from: '', to: '', mode: 'rust', disciplines: ['hardlopen', 'kracht'] });
+    const [adding, setAdding] = useState(false);
+    const valid = draft.from && draft.to && draft.to >= draft.from;
+
+    function save() {
+      const disciplines = draft.mode === 'licht' ? draft.disciplines : [];
+      if (draft.mode === 'licht' && disciplines.length === 0) return;
+      saveHoliday({ id: uid('hol'), label: draft.label.trim() || 'Vakantie', from: draft.from, to: draft.to, mode: draft.mode, disciplines });
+      setDraft({ label: '', from: '', to: '', mode: 'rust', disciplines: ['hardlopen', 'kracht'] });
+      setAdding(false);
+    }
+
+    return (
+      <div style={{ borderTop: '1px solid var(--sand)', marginTop: 14, paddingTop: 14 }}>
+        <h3 style={{ fontSize: 15, marginBottom: 2, display: 'flex', alignItems: 'center', gap: 7 }}><Sun size={16} color="var(--accent)" />Vakanties</h3>
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>
+          Geef aan wanneer je weg bent. Die dagen worden rust of een lichtere sessie, de opbouw eromheen wordt aangepast, en na je vakantie begint het volume weer voorzichtig.
+        </p>
+
+        {holidays.length > 0 && holidays.map((h) => (
+          <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, border: '1px solid var(--sand)', borderRadius: 12, padding: 10, marginBottom: 8, opacity: h.to < todayKey ? 0.55 : 1 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{h.label || 'Vakantie'}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {holidayRangeLabel(h)} · {HOLIDAY_MODE_LABEL[h.mode]}
+                {h.mode === 'licht' && h.disciplines?.length ? ` (${h.disciplines.map((d) => DISCIPLINE_META[d].label.toLowerCase()).join(', ')})` : ''}
+              </div>
+            </div>
+            <button className="tri-btn" style={{ minHeight: 36, padding: '6px 10px', background: '#F7DAD3', color: 'var(--danger)', flexShrink: 0 }}
+              onClick={() => removeHoliday(h.id)} aria-label="Vakantie verwijderen"><Trash2 size={15} /></button>
+          </div>
+        ))}
+
+        {!adding ? (
+          <button className="tri-btn tri-btn-ghost tri-btn-block" style={{ minHeight: 42 }} onClick={() => setAdding(true)}>
+            <Plus size={16} style={{ verticalAlign: 'middle', marginRight: 6 }} />Vakantie toevoegen
+          </button>
+        ) : (
+          <div style={{ border: '1px solid var(--sand)', borderRadius: 14, padding: 12 }}>
+            <div className="tri-field">
+              <label className="tri-label">Naam (optioneel)</label>
+              <input className="tri-input" placeholder="bv. Italië" value={draft.label} onChange={(e) => setDraft((d) => ({ ...d, label: e.target.value }))} />
+            </div>
+            <div className="tri-row">
+              <div className="tri-field">
+                <label className="tri-label">Van</label>
+                <input type="date" className="tri-input" value={draft.from} onChange={(e) => setDraft((d) => ({ ...d, from: e.target.value, to: d.to && d.to < e.target.value ? e.target.value : d.to }))} />
+              </div>
+              <div className="tri-field">
+                <label className="tri-label">Tot en met</label>
+                <input type="date" className="tri-input" min={draft.from || undefined} value={draft.to} onChange={(e) => setDraft((d) => ({ ...d, to: e.target.value }))} />
+              </div>
+            </div>
+            <div className="tri-field">
+              <label className="tri-label">Wat kan er?</label>
+              <div className="tri-row">
+                <button className={`tri-choice ${draft.mode === 'rust' ? 'selected' : ''}`} onClick={() => setDraft((d) => ({ ...d, mode: 'rust' }))}>Geen training</button>
+                <button className={`tri-choice ${draft.mode === 'licht' ? 'selected' : ''}`} onClick={() => setDraft((d) => ({ ...d, mode: 'licht' }))}>Licht trainen</button>
+              </div>
+            </div>
+            {draft.mode === 'licht' && (
+              <div className="tri-field">
+                <label className="tri-label">Mogelijke sporten op locatie</label>
+                <div className="tri-daytab">
+                  {HOLIDAY_DISCIPLINES.map((d) => {
+                    const isSel = draft.disciplines.includes(d);
+                    const meta = DISCIPLINE_META[d];
+                    return (
+                      <button key={d} className="tri-choice" style={{
+                        padding: '8px 12px', fontSize: 13, display: 'flex', alignItems: 'center', gap: 5,
+                        borderColor: isSel ? 'var(--terracotta)' : undefined,
+                        background: isSel ? '#FDEEE4' : undefined,
+                        color: isSel ? 'var(--terracotta)' : undefined,
+                      }} onClick={() => setDraft((x) => ({
+                        ...x, disciplines: isSel ? x.disciplines.filter((y) => y !== d) : [...x.disciplines, d],
+                      }))}>
+                        <meta.icon size={13} />{meta.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 0 0' }}>
+                  Sessies in een sport die hier niet staat worden omgezet naar een sport die wel kan, of naar rust. Alles wordt korter en rustiger.
+                </p>
+              </div>
+            )}
+            <div className="tri-row" style={{ marginTop: 4 }}>
+              <button className="tri-btn tri-btn-secondary" onClick={() => setAdding(false)}>Annuleren</button>
+              <button className="tri-btn tri-btn-primary" disabled={!valid || (draft.mode === 'licht' && draft.disciplines.length === 0)} onClick={save}>Opslaan</button>
+            </div>
+          </div>
+        )}
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 0 }}>
+          Weken die nog niet begonnen zijn worden meteen opnieuw opgebouwd. Weken met ingevulde resultaten blijven ongemoeid.
+        </p>
+      </div>
+    );
+  }
+
   /* --------------------------- render app shell --------------------------- */
   const tabs = [
     { key: 'dashboard', label: 'Doelen', icon: Target },
@@ -2411,6 +2748,8 @@ export default function App() {
               );
             })}
             <p style={{ fontSize: 12, color: 'var(--muted)' }}>Kiezen twee sporten dezelfde dag? Dan krijgt de sport die het eerst in het schema staat voorrang; de andere schuift automatisch naar een vrije dag.</p>
+
+            <HolidayPanel />
 
             <div style={{ borderTop: '1px solid var(--sand)', marginTop: 10, paddingTop: 14 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
