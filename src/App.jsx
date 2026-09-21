@@ -243,6 +243,43 @@ function parseTargetTime(str) {
   return null;
 }
 
+// Weken worden in de app aangeduid met hun periode (maandag t/m zondag), niet met een weeknummer.
+function weekEnd(startDate) { return addDays(new Date(startDate), 6); }
+
+function fmtDayMonth(d) {
+  if (!d) return '';
+  return new Date(d).toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' });
+}
+
+function weekRangeLabel(startDate) {
+  if (!startDate) return '';
+  const a = new Date(startDate);
+  const b = weekEnd(a);
+  if (a.getFullYear() !== b.getFullYear()) {
+    const opts = { day: 'numeric', month: 'short', year: 'numeric' };
+    return `${a.toLocaleDateString('nl-NL', opts)} – ${b.toLocaleDateString('nl-NL', opts)}`;
+  }
+  // Binnen dezelfde maand is de maandnaam één keer genoeg: "22 – 28 sep"
+  const left = a.getMonth() === b.getMonth() ? String(a.getDate()) : fmtDayMonth(a);
+  return `${left} – ${fmtDayMonth(b)}`;
+}
+
+function weekRelativeLabel(startDate) {
+  if (!startDate) return '';
+  const a = startOfWeek(new Date(startDate)); a.setHours(0, 0, 0, 0);
+  const b = startOfWeek(new Date()); b.setHours(0, 0, 0, 0);
+  const diff = Math.round((a - b) / 604800000);
+  if (diff === 0) return 'Deze week';
+  if (diff === 1) return 'Volgende week';
+  if (diff === -1) return 'Vorige week';
+  return '';
+}
+
+function weekMonthLabel(startDate) {
+  if (!startDate) return '';
+  return new Date(startDate).toLocaleDateString('nl-NL', { month: 'long', year: 'numeric' });
+}
+
 function paceGuidance(discipline, type, intake) {
   if (discipline === 'zwemmen') {
     const base = paceStrToSec(intake.swim.pace);
@@ -607,7 +644,7 @@ function computeBlockComparison(weeks) {
       totalKm: Math.round(totalKm * 10) / 10,
       completionPct: total ? Math.round((completed / total) * 100) : 0,
       avgRpe: rpes.length ? Math.round((rpes.reduce((a, b) => a + b, 0) / rpes.length) * 10) / 10 : null,
-      label: `Week ${block[0].weekNumber}-${block[block.length - 1].weekNumber}`,
+      label: `${fmtDayMonth(block[0].startDate)} – ${fmtDayMonth(weekEnd(block[block.length - 1].startDate))}`,
     };
   }
   return { recent: stats(recentBlock), prior: stats(priorBlock) };
@@ -1665,11 +1702,14 @@ export default function App() {
             <h3 style={{ fontSize: 16, marginBottom: 12 }}>Eerdere doelen</h3>
             {[...pastGoals].reverse().map((pg, i, arr) => {
               const achieved = (pg.subGoals || []).filter((sg) => sg.status === 'achieved').length;
+              const pgFirst = weeks.find((w) => w.weekNumber === pg.startWeek);
+              const pgLast = weeks.find((w) => w.weekNumber === pg.endWeek) || pgFirst;
+              const pgPeriod = pgFirst ? `${fmtDayMonth(pgFirst.startDate)} – ${fmtDayMonth(weekEnd(pgLast.startDate))}` : null;
               return (
                 <div key={pg.id} style={{ padding: '10px 0', borderTop: i === 0 ? 'none' : '1px solid var(--sand)' }}>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>{RACE_TYPES[pg.raceType]?.label ?? pg.raceType}</div>
                   <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                    {fmtDate(pg.raceDate)} · week {pg.startWeek}-{pg.endWeek}
+                    {fmtDate(pg.raceDate)}{pgPeriod ? ` · schema ${pgPeriod}` : ''}
                   </div>
                   <div style={{ fontSize: 13, marginTop: 4 }}>
                     {pg.finishTime ? `Eindtijd ${pg.finishTime}` : 'Geen eindtijd genoteerd'}
@@ -1727,8 +1767,8 @@ export default function App() {
             <button className="tri-btn tri-btn-secondary" style={{ minHeight: 40, padding: '8px 12px' }} disabled={currentWeekIndex === 0}
               onClick={() => setCurrentWeekIndex((i) => Math.max(i - 1, 0))}><ChevronLeft size={18} /></button>
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontWeight: 700, fontFamily: 'Fraunces, serif', fontSize: 18 }}>Week {currentWeek.weekNumber}</div>
-              <div style={{ fontSize: 12, color: 'var(--muted)' }}>vanaf {fmtDate(currentWeek.startDate)}</div>
+              <div style={{ fontWeight: 700, fontFamily: 'Fraunces, serif', fontSize: 18 }}>{weekRangeLabel(currentWeek.startDate)}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>{weekRelativeLabel(currentWeek.startDate) || weekMonthLabel(currentWeek.startDate)}</div>
             </div>
             <button className="tri-btn tri-btn-secondary" style={{ minHeight: 40, padding: '8px 12px' }} disabled={currentWeekIndex >= weeks.length - 1}
               onClick={() => setCurrentWeekIndex((i) => Math.min(i + 1, weeks.length - 1))}><ChevronRight size={18} /></button>
@@ -1747,7 +1787,7 @@ export default function App() {
             </button>
           ) : (
             <div style={{ marginTop: 12, background: '#F6E3C0', borderRadius: 12, padding: 12 }}>
-              <p style={{ fontSize: 13, margin: '0 0 10px' }}>Week {currentWeek.weekNumber} opnieuw laten opbouwen? Handmatige aanpassingen en ingevulde resultaten in deze week gaan dan verloren.</p>
+              <p style={{ fontSize: 13, margin: '0 0 10px' }}>De week van {weekRangeLabel(currentWeek.startDate)} opnieuw laten opbouwen? Handmatige aanpassingen en ingevulde resultaten in deze week gaan dan verloren.</p>
               <div className="tri-row">
                 <button className="tri-btn tri-btn-secondary" style={{ minHeight: 38, fontSize: 13 }} onClick={() => setRegenConfirm(false)}>Annuleren</button>
                 <button className="tri-btn" style={{ minHeight: 38, fontSize: 13, background: 'var(--terracotta)', color: '#fff' }}
@@ -1771,7 +1811,7 @@ export default function App() {
         )}
         {isLast && !goalPassed && (
           <button className="tri-btn tri-btn-primary tri-btn-block" onClick={generateNextWeek}>
-            Genereer week {currentWeek.weekNumber + 1} <Sparkles size={16} style={{ verticalAlign: 'middle', marginLeft: 6 }} />
+            Genereer {weekRangeLabel(addDays(new Date(currentWeek.startDate), 7))} <Sparkles size={16} style={{ verticalAlign: 'middle', marginLeft: 6 }} />
           </button>
         )}
       </div>
@@ -1863,7 +1903,7 @@ export default function App() {
             <button className="tri-btn tri-btn-secondary" style={{ minHeight: 40, padding: '8px 12px' }} disabled={resultsWeekIndex === 0}
               onClick={() => setResultsWeekIndex((i) => Math.max(i - 1, 0))}><ChevronLeft size={18} /></button>
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontWeight: 700, fontFamily: 'Fraunces, serif', fontSize: 18 }}>Week {week.weekNumber}</div>
+              <div style={{ fontWeight: 700, fontFamily: 'Fraunces, serif', fontSize: 18 }}>{weekRangeLabel(week.startDate)}</div>
               <div style={{ fontSize: 12, color: 'var(--muted)' }}>{done}/{trainSessions.length} ingevuld</div>
             </div>
             <button className="tri-btn tri-btn-secondary" style={{ minHeight: 40, padding: '8px 12px' }} disabled={resultsWeekIndex >= weeks.length - 1}
@@ -1966,7 +2006,7 @@ export default function App() {
       weeks.forEach((w) => {
         w.sessions.forEach((s) => {
           if (s.discipline === 'rust') return;
-          list.push({ ...s, date: addDays(new Date(w.startDate), s.day), weekId: w.id, weekNumber: w.weekNumber });
+          list.push({ ...s, date: addDays(new Date(w.startDate), s.day), weekId: w.id, weekNumber: w.weekNumber, weekStart: w.startDate });
         });
       });
       return list;
@@ -2057,7 +2097,7 @@ export default function App() {
           <div className="tri-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>{fmtDate(selected.date)} · Week {selected.weekNumber}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>{fmtDate(selected.date)} · week {weekRangeLabel(selected.weekStart)}</div>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>{DISCIPLINE_META[selected.discipline].label} · {selected.type}</div>
                 {selected.target && <div style={{ fontSize: 13, color: 'var(--muted)' }}>{selected.target.label}</div>}
               </div>
@@ -2079,8 +2119,11 @@ export default function App() {
     const bikeSeries = getDisciplineSeries(weeks, 'fietsen');
     const runSeries = getDisciplineSeries(weeks, 'hardlopen');
     const seriesMap = { zwemmen: swimSeries, fietsen: bikeSeries, hardlopen: runSeries };
+    // De reeksen rekenen met weeknummers; op de as zetten we de startdatum van die week.
+    const startByWeekNumber = {};
+    weeks.forEach((w) => { startByWeekNumber[w.weekNumber] = w.startDate; });
     const chartData = seriesMap[progressDiscipline].map((s) => ({
-      week: `W${s.week}`, value: progressDiscipline === 'fietsen' ? s.value : s.value,
+      week: fmtDayMonth(startByWeekNumber[s.week]) || String(s.week), value: s.value,
     }));
     const unitLabel = progressDiscipline === 'fietsen' ? 'km/u' : 'sec/eenheid (lager = sneller)';
 
@@ -2090,13 +2133,13 @@ export default function App() {
         const d = parseFloat(s.result?.distance);
         return a + (isNaN(d) ? 0 : d > 100 ? d / 1000 : d);
       }, 0);
-      return { week: `W${w.weekNumber}`, Gepland: Math.round(planned * 10) / 10, Voltooid: Math.round(actual * 10) / 10 };
+      return { week: fmtDayMonth(w.startDate), Gepland: Math.round(planned * 10) / 10, Voltooid: Math.round(actual * 10) / 10 };
     });
 
     const hrData = weeks.map((w) => {
       const hrs = w.sessions.filter((s) => s.result && s.result.hr).map((s) => Number(s.result.hr));
       const avg = hrs.length ? Math.round(hrs.reduce((a, b) => a + b, 0) / hrs.length) : null;
-      return { week: `W${w.weekNumber}`, hr: avg };
+      return { week: fmtDayMonth(w.startDate), hr: avg };
     }).filter((d) => d.hr != null);
 
     const blockComparison = computeBlockComparison(weeks);
@@ -2131,7 +2174,7 @@ export default function App() {
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={chartData}>
                   <CartesianGrid stroke="#EFE2CB" />
-                  <XAxis dataKey="week" tick={{ fontSize: 12, fill: '#8A7460' }} />
+                  <XAxis dataKey="week" tick={{ fontSize: 11, fill: '#8A7460' }} interval="preserveStartEnd" minTickGap={14} />
                   <YAxis tick={{ fontSize: 12, fill: '#8A7460' }} reversed={progressDiscipline !== 'fietsen'} />
                   <Tooltip formatter={(v) => progressDiscipline === 'fietsen' ? `${v.toFixed(1)} km/u` : secToPaceStr(v)} />
                   <Line type="monotone" dataKey="value" stroke="#C1552C" strokeWidth={3} dot={{ r: 4, fill: '#C1552C' }} />
@@ -2149,7 +2192,7 @@ export default function App() {
               <ResponsiveContainer width="100%" height={220}>
                 <BarChart data={volumeData}>
                   <CartesianGrid stroke="#EFE2CB" />
-                  <XAxis dataKey="week" tick={{ fontSize: 12, fill: '#8A7460' }} />
+                  <XAxis dataKey="week" tick={{ fontSize: 11, fill: '#8A7460' }} interval="preserveStartEnd" minTickGap={14} />
                   <YAxis tick={{ fontSize: 12, fill: '#8A7460' }} />
                   <Tooltip />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -2168,7 +2211,7 @@ export default function App() {
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={hrData}>
                   <CartesianGrid stroke="#EFE2CB" />
-                  <XAxis dataKey="week" tick={{ fontSize: 12, fill: '#8A7460' }} />
+                  <XAxis dataKey="week" tick={{ fontSize: 11, fill: '#8A7460' }} interval="preserveStartEnd" minTickGap={14} />
                   <YAxis tick={{ fontSize: 12, fill: '#8A7460' }} domain={['auto', 'auto']} />
                   <Tooltip />
                   <Line type="monotone" dataKey="hr" stroke="#B84A3E" strokeWidth={3} dot={{ r: 4, fill: '#B84A3E' }} />
@@ -2215,7 +2258,7 @@ export default function App() {
         {progressSubTab === 'voorspelling' && (
           <div className="tri-card">
             <h3 style={{ fontSize: 15, marginBottom: 4 }}>Verwachte splits op wedstrijddag</h3>
-            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Op basis van de trend in je resultaten, geëxtrapoleerd naar week {goalEndWeek}.</p>
+            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Op basis van de trend in je resultaten, geëxtrapoleerd naar {mainGoal.raceDate ? `je wedstrijddag (${fmtDate(mainGoal.raceDate)})` : 'het einde van je plan'}.</p>
             {prediction && (
               <>
                 {[
