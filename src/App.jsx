@@ -195,6 +195,13 @@ function buildDayAssignments(template, defaultDays) {
   }
   return assignment;
 }
+// Hele kalenderdagen van een datum (Date) tot een 'JJJJ-MM-DD'-string, los van tijdzone en zomertijd
+function calendarDaysUntil(fromDate, toDateStr) {
+  const a = new Date(fromDate); a.setHours(0, 0, 0, 0);
+  const b = new Date(`${toDateStr}T00:00:00`);
+  return Math.round((b - a) / 86400000);
+}
+
 function fmtDate(d) {
   if (!d) return '';
   const date = new Date(d);
@@ -371,16 +378,20 @@ const QUALITY_ROTATION = {
 };
 
 function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWeeks, defaultDays) {
-  const { factor: adaptFactor, note: adaptNote } = computeAdaptation(prevWeek);
-  const weeksRemaining = Math.max(totalWeeks - weekNumber + 1, 1);
+  const { factor: adaptFactor, note: baseAdaptNote } = computeAdaptation(prevWeek);
+  // Weeknummers lopen door over alle doelen heen (zodat geschiedenis en grafieken kloppen);
+  // fase, volumeopbouw en hersteweken tellen vanaf de start van het huidige doel.
+  const goalWeek = weekNumber - ((mainGoal.startWeek || 1) - 1);
+  const adaptNote = goalWeek === 1 && prevWeek ? `Eerste week richting je nieuwe doel. ${baseAdaptNote}` : baseAdaptNote;
+  const weeksRemaining = Math.max(totalWeeks - goalWeek + 1, 1);
   const taperWeeks = TAPER_WEEKS[mainGoal.raceType] ?? 2;
   const phase = getPhase(weeksRemaining, totalWeeks, taperWeeks);
-  const isDeload = phase !== 'taper' && weekNumber % 4 === 0;
+  const isDeload = phase !== 'taper' && goalWeek % 4 === 0;
   const isLongCourse = mainGoal.raceType === 'half' || mainGoal.raceType === 'full';
   const daysPerWeek = Math.min(Math.max(intake.daysPerWeek, 3), 6);
   const template = TEMPLATES[daysPerWeek];
   const dayIdx = buildDayAssignments(template, defaultDays);
-  const weeklyVolumes = computeWeeklyVolumes(intake, mainGoal, phase, weekNumber, totalWeeks, adaptFactor, isDeload, prevWeek);
+  const weeklyVolumes = computeWeeklyVolumes(intake, mainGoal, phase, goalWeek, totalWeeks, adaptFactor, isDeload, prevWeek);
 
   const counts = {};
   template.forEach((d) => { counts[d] = (counts[d] || 0) + 1; });
@@ -418,7 +429,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
     const { discipline, occurrence, total, isFirstOfWeek, role } = slot;
     let type = discipline === 'kracht' ? 'kracht'
       : role === 'lang' ? 'lange training'
-      : role === 'kwaliteit' ? QUALITY_ROTATION[discipline][(weekNumber - 1) % QUALITY_ROTATION[discipline].length]
+      : role === 'kwaliteit' ? QUALITY_ROTATION[discipline][(goalWeek - 1) % QUALITY_ROTATION[discipline].length]
       : (discipline === 'zwemmen' ? 'techniek' : 'duurloop');
     let wasDowngraded = false;
     if (HARDNESS[type] >= 2 && prevHardness >= 2) {
@@ -432,7 +443,7 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
       brickNote = 'Sluit af met 10-15 minuten hardlopen op wedstrijdtempo direct na het fietsen — dat traint je "wisselbenen".';
       wasDowngraded = false;
     }
-    const target = computeTargetValue(discipline, type, role, weeklyVolumes, weekNumber, phase);
+    const target = computeTargetValue(discipline, type, role, weeklyVolumes, goalWeek, phase);
     const guide = paceGuidance(discipline, type, intake);
     daySessions[d] = {
       id: uid('s'),
@@ -628,6 +639,10 @@ export default function App() {
   const [obStep, setObStep] = useState(0);
   const [mainGoal, setMainGoal] = useState({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
   const [subGoals, setSubGoals] = useState([]);
+  const [pastGoals, setPastGoals] = useState([]);
+  const [ngStep, setNgStep] = useState(0);
+  const [ngDraft, setNgDraft] = useState({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
+  const [ngFinishTime, setNgFinishTime] = useState('');
   const [newSubGoal, setNewSubGoal] = useState({ text: '', targetDate: '' });
   const [intake, setIntake] = useState({
     swim: { volumeKm: 3, pace: '2:15', experience: 'gevorderd', targetVolumeKm: null },
@@ -671,6 +686,7 @@ export default function App() {
       if (data.stage) setStage(data.stage);
       if (data.mainGoal) setMainGoal(data.mainGoal);
       if (data.subGoals) setSubGoals(data.subGoals);
+      if (data.pastGoals) setPastGoals(data.pastGoals);
       if (data.intake) setIntake(data.intake);
       if (data.weeks) setWeeks(data.weeks);
       if (data.totalWeeks) setTotalWeeks(data.totalWeeks);
@@ -683,7 +699,7 @@ export default function App() {
   // Autosave (debounced): always to this device instantly, and to Google Sheets when configured
   useEffect(() => {
     if (!loaded) return;
-    const snapshot = { stage, mainGoal, subGoals, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex };
+    const snapshot = { stage: stage === 'newgoal' ? 'app' : stage, mainGoal, subGoals, pastGoals, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex };
     saveLocal(snapshot);
     if (!hasRemote()) { setSyncStatus('local-only'); return; }
     setSyncStatus('saving');
@@ -692,14 +708,14 @@ export default function App() {
       setSyncStatus(ok ? 'saved' : 'error');
     }, 900);
     return () => clearTimeout(t);
-  }, [loaded, stage, mainGoal, subGoals, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex]);
+  }, [loaded, stage, mainGoal, subGoals, pastGoals, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex]);
 
   function resetAllData() {
     saveLocal(null);
     if (hasRemote()) saveRemote({});
     setStage('onboarding'); setObStep(0);
     setMainGoal({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
-    setSubGoals([]); setWeeks([]); setTotalWeeks(12); setCurrentWeekIndex(0); setResultsWeekIndex(0);
+    setSubGoals([]); setPastGoals([]); setWeeks([]); setTotalWeeks(12); setCurrentWeekIndex(0); setResultsWeekIndex(0);
     setDefaultDays({ zwemmen: [], fietsen: [], hardlopen: [], kracht: [] });
     setShowSettings(false);
   }
@@ -724,6 +740,57 @@ export default function App() {
     setWeeks((w) => [...w, nextWeek]);
     setCurrentWeekIndex(weeks.length);
     setResultsWeekIndex(weeks.length);
+  }
+
+  function openNewGoal() {
+    setNgDraft({ raceType: mainGoal.raceType, raceDate: '', ambition: 'finish', targetTime: '' });
+    setNgFinishTime('');
+    setNgStep(0);
+    setStage('newgoal');
+  }
+
+  function confirmNewGoal() {
+    const last = weeks[weeks.length - 1];
+    const today = startOfWeek(new Date());
+    const afterLast = last ? addDays(new Date(last.startDate), 7) : today;
+    const nextStart = afterLast > today ? afterLast : today;
+    const startWeek = last ? last.weekNumber + 1 : 1;
+    const tw = Math.max(Math.floor(calendarDaysUntil(nextStart, ngDraft.raceDate) / 7) + 1, 4);
+    const todayKey = dateKey(new Date());
+
+    // Subdoelen die nog lopen (niet behaald, streefdatum niet voorbij) gaan mee; de rest verhuist naar het oude doel.
+    const keepSub = (sg) => sg.status !== 'achieved' && (!sg.targetDate || sg.targetDate >= todayKey);
+    const carriedSubGoals = subGoals.filter(keepSub);
+    const archivedSubGoals = subGoals.filter((sg) => !keepSub(sg));
+
+    const archived = {
+      id: uid('pg'),
+      raceType: mainGoal.raceType, raceDate: mainGoal.raceDate, ambition: mainGoal.ambition, targetTime: mainGoal.targetTime,
+      startWeek: goalStartWeek, endWeek: last ? last.weekNumber : 0,
+      finishTime: ngFinishTime.trim() || null,
+      subGoals: archivedSubGoals,
+      archivedAt: new Date().toISOString(),
+    };
+    const newGoal = { ...ngDraft, startWeek };
+    // Handmatige piekvolumes hoorden bij de vorige wedstrijdafstand; bij een andere afstand beginnen we opnieuw.
+    const nextIntake = ngDraft.raceType === mainGoal.raceType ? intake : {
+      ...intake,
+      swim: { ...intake.swim, targetVolumeKm: null },
+      bike: { ...intake.bike, targetVolumeKm: null },
+      run: { ...intake.run, targetVolumeKm: null },
+    };
+
+    const firstWeek = generateWeek(startWeek, nextStart, nextIntake, newGoal, last || null, tw, defaultDays);
+    setPastGoals((pg) => [...pg, archived]);
+    setSubGoals(carriedSubGoals);
+    setMainGoal(newGoal);
+    setTotalWeeks(tw);
+    setIntake(nextIntake);
+    setWeeks((w) => [...w, firstWeek]);
+    setCurrentWeekIndex(weeks.length);
+    setResultsWeekIndex(weeks.length);
+    setActiveTab('schedule');
+    setStage('app');
   }
 
   function regenerateWeek(weekIndex) {
@@ -834,6 +901,10 @@ export default function App() {
     setDayPickerFor(null);
   }
 
+  // Weeknummers lopen door over doelen heen: het eindpunt van het huidige doel ligt dus op startweek + looptijd.
+  const goalStartWeek = mainGoal.startWeek || 1;
+  const goalEndWeek = goalStartWeek + totalWeeks - 1;
+
   const prediction = useMemo(() => {
     if (!weeks.length) return null;
     const swimSeries = getDisciplineSeries(weeks, 'zwemmen');
@@ -843,9 +914,9 @@ export default function App() {
     const swimFallback = paceStrToSec(intake.swim.pace);
     const bikeFallback = intake.bike.speedKmh;
     const runFallback = paceStrToSec(intake.run.paceMinKm);
-    const swimPace = predictValue(swimSeries, totalWeeks, swimFallback);
-    const bikeSpeed = predictValue(bikeSeries, totalWeeks, bikeFallback);
-    const runPace = predictValue(runSeries, totalWeeks, runFallback);
+    const swimPace = predictValue(swimSeries, goalEndWeek, swimFallback);
+    const bikeSpeed = predictValue(bikeSeries, goalEndWeek, bikeFallback);
+    const runPace = predictValue(runSeries, goalEndWeek, runFallback);
     const dist = RACE_TYPES[mainGoal.raceType];
     const swimTime = dist.swim * 1000 / 100 * swimPace;
     const bikeTime = bikeSpeed > 0 ? (dist.bike / bikeSpeed) * 3600 : 0;
@@ -865,7 +936,7 @@ export default function App() {
       }
     }
     return { swimTime, bikeTime, runTime, transition, total, statusLabel, hasData: hasData || Boolean(raceBased), raceBased };
-  }, [weeks, mainGoal, totalWeeks, intake]);
+  }, [weeks, mainGoal, totalWeeks, goalEndWeek, intake]);
 
   const recommendation = useMemo(() => {
     if (!prediction || !prediction.hasData) return 'Vul na je trainingen resultaten in — dan geef ik een gerichte inschatting en advies.';
@@ -883,8 +954,9 @@ export default function App() {
   }, [prediction, weeks]);
 
   const daysToRace = mainGoal.raceDate ? daysBetween(mainGoal.raceDate, new Date()) : null;
-  const weeksElapsed = weeks.length;
-  const dialPct = totalWeeks ? Math.min(weeksElapsed / totalWeeks, 1) : 0;
+  const goalPassed = Boolean(mainGoal.raceDate) && mainGoal.raceDate < dateKey(new Date());
+  const weeksElapsed = Math.max(weeks.length - (goalStartWeek - 1), 0);
+  const dialPct = goalPassed ? 1 : totalWeeks ? Math.min(weeksElapsed / totalWeeks, 1) : 0;
 
   /* --------------------------- shared styles --------------------------- */
   const styleBlock = (
@@ -947,6 +1019,128 @@ export default function App() {
         <div style={{ textAlign: 'center' }}>
           <Sparkles size={26} color="var(--terracotta)" />
           <div style={{ marginTop: 8, color: 'var(--muted)', fontSize: 14 }}>Je trainingsplan wordt geladen…</div>
+        </div>
+      </div>
+    );
+  }
+
+  /* --------------------------- nieuw doel UI --------------------------- */
+  if (stage === 'newgoal') {
+    const ngSteps = ['Terugblik', 'Nieuw doel', 'Overzicht'];
+    const tomorrowKey = dateKey(addDays(new Date(), 1));
+    const dateOk = Boolean(ngDraft.raceDate) && ngDraft.raceDate >= tomorrowKey;
+    const todayKey = dateKey(new Date());
+    const carriedCount = subGoals.filter((sg) => sg.status !== 'achieved' && (!sg.targetDate || sg.targetDate >= todayKey)).length;
+    const achievedCount = subGoals.filter((sg) => sg.status === 'achieved').length;
+    const resetsVolumes = ngDraft.raceType !== mainGoal.raceType
+      && ['swim', 'bike', 'run'].some((k) => intake[k].targetVolumeKm);
+    return (
+      <div className="tri-root">
+        {styleBlock}
+        <div className="tri-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div className="tri-eyebrow">Stap {ngStep + 1} van {ngSteps.length}</div>
+            <h1 style={{ fontSize: 26 }}>{ngSteps[ngStep]}</h1>
+          </div>
+          <button className="tri-btn tri-btn-secondary" style={{ minHeight: 40, padding: '8px 12px', marginTop: 4 }} onClick={() => setStage('app')}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="tri-onboard-progress">
+          {ngSteps.map((_, i) => <div key={i} className={i <= ngStep ? 'done' : ''} />)}
+        </div>
+        <div className="tri-scroll">
+          {ngStep === 0 && (
+            <div className="tri-card">
+              <p style={{ fontSize: 14, marginTop: 0 }}>
+                Je {RACE_TYPES[mainGoal.raceType].label.toLowerCase()} van {fmtDate(mainGoal.raceDate)} is voorbij.
+                {achievedCount > 0 ? ` Onderweg behaalde je ${achievedCount} subdoel${achievedCount === 1 ? '' : 'en'}.` : ''}
+              </p>
+              <div className="tri-field">
+                <label className="tri-label">Eindtijd (optioneel, u:mm:ss)</label>
+                <input className="tri-input" placeholder="bv. 5:24:10" value={ngFinishTime}
+                  onChange={(e) => setNgFinishTime(e.target.value)} />
+              </div>
+              <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 0 }}>
+                Dit doel komt onder “Eerdere doelen” te staan. Al je weken en resultaten blijven bewaard.
+              </p>
+            </div>
+          )}
+
+          {ngStep === 1 && (
+            <div className="tri-card">
+              <div className="tri-field">
+                <label className="tri-label">Type wedstrijd</label>
+                <div className="tri-choice-grid">
+                  {Object.entries(RACE_TYPES).map(([key, val]) => (
+                    <button key={key} className={`tri-choice ${ngDraft.raceType === key ? 'selected' : ''}`}
+                      onClick={() => setNgDraft((g) => ({ ...g, raceType: key }))}>
+                      {val.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="tri-field">
+                <label className="tri-label">Wedstrijddatum</label>
+                <input type="date" className="tri-input" min={tomorrowKey} value={ngDraft.raceDate}
+                  onChange={(e) => setNgDraft((g) => ({ ...g, raceDate: e.target.value }))} />
+                {ngDraft.raceDate && !dateOk && (
+                  <p style={{ fontSize: 12, color: 'var(--danger)', margin: '6px 0 0' }}>Kies een datum in de toekomst.</p>
+                )}
+              </div>
+              <div className="tri-field">
+                <label className="tri-label">Ambitie</label>
+                <div className="tri-row">
+                  <button className={`tri-choice ${ngDraft.ambition === 'finish' ? 'selected' : ''}`}
+                    onClick={() => setNgDraft((g) => ({ ...g, ambition: 'finish' }))}>Uitfinishen</button>
+                  <button className={`tri-choice ${ngDraft.ambition === 'target' ? 'selected' : ''}`}
+                    onClick={() => setNgDraft((g) => ({ ...g, ambition: 'target' }))}>Doeltijd</button>
+                </div>
+              </div>
+              {ngDraft.ambition === 'target' && (
+                <div className="tri-field">
+                  <label className="tri-label">Gewenste eindtijd (u:mm of u:mm:ss)</label>
+                  <input className="tri-input" placeholder="bv. 5:30:00" value={ngDraft.targetTime}
+                    onChange={(e) => setNgDraft((g) => ({ ...g, targetTime: e.target.value }))} />
+                </div>
+              )}
+            </div>
+          )}
+
+          {ngStep === 2 && (
+            <div className="tri-card">
+              <h3 style={{ fontSize: 16, marginBottom: 10 }}>Klaar om te starten</h3>
+              <p style={{ fontSize: 14, color: 'var(--muted)' }}>
+                Nieuw hoofddoel: <b style={{ color: 'var(--text)' }}>{RACE_TYPES[ngDraft.raceType].label}</b> op {fmtDate(ngDraft.raceDate)}.
+                {ngDraft.ambition === 'target' && ngDraft.targetTime ? ` Doeltijd: ${ngDraft.targetTime}.` : ' Doel: uitfinishen.'}
+              </p>
+              <p style={{ fontSize: 14, color: 'var(--muted)' }}>
+                {carriedCount > 0
+                  ? (carriedCount === 1 ? '1 lopend subdoel gaat mee naar je nieuwe doel.' : `${carriedCount} lopende subdoelen gaan mee naar je nieuwe doel.`)
+                  : 'Er gaan geen lopende subdoelen mee. Je kunt er straks nieuwe toevoegen.'}
+              </p>
+              {resetsVolumes && (
+                <p style={{ fontSize: 13, color: 'var(--muted)' }}>
+                  Je handmatig ingestelde piekvolumes hoorden bij de vorige afstand en worden gewist. Je kunt ze in Instellingen opnieuw invullen.
+                </p>
+              )}
+              <p style={{ fontSize: 14 }}>
+                Ik bouw het nieuwe schema op vanaf je laatste weken. Is je niveau veranderd? Pas het wekelijkse volume aan in Instellingen.
+              </p>
+            </div>
+          )}
+        </div>
+        <div style={{ padding: '4px 16px 24px', display: 'flex', gap: 10 }}>
+          {ngStep > 0 && <button className="tri-btn tri-btn-secondary" onClick={() => setNgStep((n) => n - 1)}><ChevronLeft size={18} style={{ verticalAlign: 'middle' }} /></button>}
+          {ngStep < ngSteps.length - 1 && (
+            <button className="tri-btn tri-btn-primary tri-btn-block" disabled={ngStep === 1 && !dateOk}
+              onClick={() => setNgStep((n) => n + 1)}>Volgende</button>
+          )}
+          {ngStep === ngSteps.length - 1 && (
+            <button className="tri-btn tri-btn-primary tri-btn-block" onClick={confirmNewGoal}>
+              Start mijn nieuwe doel <Sparkles size={16} style={{ verticalAlign: 'middle', marginLeft: 6 }} />
+            </button>
+          )}
         </div>
       </div>
     );
@@ -1353,14 +1547,26 @@ export default function App() {
     const r = 46, circ = 2 * Math.PI * r;
     return (
       <div className="tri-scroll">
+        {goalPassed && (
+          <div className="tri-card" style={{ background: 'var(--success-bg)', border: '1.5px solid var(--success)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <Flag size={18} color="var(--success)" />
+              <h3 style={{ fontSize: 16 }}>Je doel is voorbij</h3>
+            </div>
+            <p style={{ fontSize: 14, margin: '0 0 12px' }}>
+              Je {RACE_TYPES[mainGoal.raceType].label.toLowerCase()} van {fmtDate(mainGoal.raceDate)} ligt achter je. Kies een nieuw doel om verder te trainen. Je schema’s en resultaten blijven bewaard.
+            </p>
+            <button className="tri-btn tri-btn-primary tri-btn-block" onClick={openNewGoal}>Nieuw doel kiezen</button>
+          </div>
+        )}
         <div className="tri-card" style={{ background: 'linear-gradient(135deg, #C1552C, #E8795A)', color: '#fff' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
             <svg width="100" height="100" viewBox="0 0 100 100">
               <circle cx="50" cy="50" r={r} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="8" />
               <circle cx="50" cy="50" r={r} fill="none" stroke="#fff" strokeWidth="8" strokeLinecap="round"
                 strokeDasharray={circ} strokeDashoffset={circ * (1 - dialPct)} transform="rotate(-90 50 50)" />
-              <text x="50" y="46" textAnchor="middle" fontSize="22" fontWeight="700" fill="#fff" fontFamily="Fraunces, serif">{daysToRace ?? '-'}</text>
-              <text x="50" y="63" textAnchor="middle" fontSize="10" fill="#fff" opacity="0.9">dagen te gaan</text>
+              <text x="50" y="46" textAnchor="middle" fontSize="22" fontWeight="700" fill="#fff" fontFamily="Fraunces, serif">{goalPassed ? 'Klaar' : daysToRace ?? '-'}</text>
+              <text x="50" y="63" textAnchor="middle" fontSize="10" fill="#fff" opacity="0.9">{goalPassed ? 'doel voorbij' : 'dagen te gaan'}</text>
             </svg>
             <div>
               <div className="tri-eyebrow" style={{ color: 'rgba(255,255,255,0.85)' }}>Hoofddoel</div>
@@ -1453,6 +1659,28 @@ export default function App() {
               <Plus size={18} /></button>
           </div>
         </div>
+
+        {pastGoals.length > 0 && (
+          <div className="tri-card">
+            <h3 style={{ fontSize: 16, marginBottom: 12 }}>Eerdere doelen</h3>
+            {[...pastGoals].reverse().map((pg, i, arr) => {
+              const achieved = (pg.subGoals || []).filter((sg) => sg.status === 'achieved').length;
+              return (
+                <div key={pg.id} style={{ padding: '10px 0', borderTop: i === 0 ? 'none' : '1px solid var(--sand)' }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{RACE_TYPES[pg.raceType]?.label ?? pg.raceType}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    {fmtDate(pg.raceDate)} · week {pg.startWeek}-{pg.endWeek}
+                  </div>
+                  <div style={{ fontSize: 13, marginTop: 4 }}>
+                    {pg.finishTime ? `Eindtijd ${pg.finishTime}` : 'Geen eindtijd genoteerd'}
+                    {pg.ambition === 'target' && pg.targetTime ? ` (doel ${pg.targetTime})` : ''}
+                    {achieved > 0 ? ` · ${achieved} subdoel${achieved === 1 ? '' : 'en'} behaald` : ''}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   }
@@ -1534,7 +1762,14 @@ export default function App() {
             dragId={dragId} dragOverDay={dragOverDay} onDragHandleDown={setDragId} />
         ))}
 
-        {isLast && (
+        {isLast && goalPassed && (
+          <div className="tri-card" style={{ background: 'var(--success-bg)', border: '1.5px solid var(--success)' }}>
+            <h3 style={{ fontSize: 16, marginBottom: 6 }}>Je wedstrijd is geweest</h3>
+            <p style={{ fontSize: 14, margin: '0 0 12px' }}>Kies eerst een nieuw doel, dan bouw ik de volgende week daarop af.</p>
+            <button className="tri-btn tri-btn-primary tri-btn-block" onClick={openNewGoal}>Nieuw doel kiezen</button>
+          </div>
+        )}
+        {isLast && !goalPassed && (
           <button className="tri-btn tri-btn-primary tri-btn-block" onClick={generateNextWeek}>
             Genereer week {currentWeek.weekNumber + 1} <Sparkles size={16} style={{ verticalAlign: 'middle', marginLeft: 6 }} />
           </button>
@@ -1980,7 +2215,7 @@ export default function App() {
         {progressSubTab === 'voorspelling' && (
           <div className="tri-card">
             <h3 style={{ fontSize: 15, marginBottom: 4 }}>Verwachte splits op wedstrijddag</h3>
-            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Op basis van de trend in je resultaten, geëxtrapoleerd naar week {totalWeeks}.</p>
+            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Op basis van de trend in je resultaten, geëxtrapoleerd naar week {goalEndWeek}.</p>
             {prediction && (
               <>
                 {[
