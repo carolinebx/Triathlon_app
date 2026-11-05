@@ -8,7 +8,7 @@ import {
   Waves, Bike, Footprints, Dumbbell, Moon, ChevronLeft, ChevronRight, Plus, X,
   Check, TrendingUp, Award, Calendar, Target, ArrowLeftRight, Flag, Sparkles,
   AlertTriangle, Edit3, Trash2, Settings, Grid3x3, RefreshCw, GripVertical,
-  Utensils, Upload, Medal, Sun,
+  Utensils, Upload, Medal, Sun, Droplets, Trophy, Activity, Info, ChevronDown, ChevronUp,
 } from 'lucide-react';
 
 /* ============================== CONSTANTS ============================== */
@@ -334,30 +334,31 @@ function holidayRangeLabel(h) {
 }
 
 function paceGuidance(discipline, type, intake) {
+  if (!intake) return null;
   if (discipline === 'zwemmen') {
     const base = paceStrToSec(intake.swim.pace);
     if (!base) return null;
-    const mult = { duurloop: 1.15, interval: 0.9, techniek: 1.2, herstel: 1.3, 'lange training': 1.1, tempo: 1.0, openwater: 1.15 }[type] ?? 1.1;
+    const mult = SWIM_MULT[type] ?? SWIM_MULT.default;
     const target = base * mult;
     return `${secToPaceStr(target * 0.97)}-${secToPaceStr(target * 1.03)} /100m`;
   }
   if (discipline === 'fietsen') {
     const base = intake.bike.speedKmh;
     if (!base) return null;
-    const mult = { duurloop: 0.85, interval: 1.12, tempo: 1.0, herstel: 0.75, 'lange training': 0.9, klimtraining: 0.8, brick: 0.9 }[type] ?? 0.9;
+    const mult = BIKE_MULT[type] ?? BIKE_MULT.default;
     return `~${Math.round(base * mult)} km/u`;
   }
   if (discipline === 'hardlopen') {
     const base = paceStrToSec(intake.run.paceMinKm);
     if (!base) return null;
-    const mult = { duurloop: 1.1, interval: 0.9, tempo: 1.0, herstel: 1.2, 'lange training': 1.08, fartlek: 1.0, heuveltraining: 1.1, brick: 1.05 }[type] ?? 1.05;
+    const mult = RUN_MULT[type] ?? RUN_MULT.default;
     const target = base * mult;
     return `${secToPaceStr(target * 0.97)}-${secToPaceStr(target * 1.03)} /km`;
   }
   return null;
 }
 
-function computeAdaptation(prevWeek) {
+function computeAdaptationBase(prevWeek) {
   if (!prevWeek) return { factor: 1, note: 'Eerste week — gebaseerd op je intake.' };
   if (prevWeek.holiday && prevWeek.holiday.restDays >= 4) {
     return { factor: 0.9, note: `Je komt terug van vakantie (${prevWeek.holiday.names.join(', ')}) — we pakken het volume rustig weer op in plaats van meteen door te bouwen.` };
@@ -461,7 +462,7 @@ function computeTargetValue(discipline, type, role, weeklyVolumes, weekNumber, p
 function buildCoachNote(discipline, type, phase, weekNumber, adaptNote, isFirstOfWeek, intake, isDeload, wasDowngraded, brickNote) {
   let note = `${TYPE_TEXT[type] || 'Gerichte training voor je opbouw.'} ${PHASE_TEXT[phase]}`;
   if (isDeload) note += ' Dit is een ingebouwde hersteweek: minder volume, zodat je lichaam de vorige weken kan verwerken.';
-  if (wasDowngraded) note += ' Aangepast in intensiteit omdat er de dag ervoor al een pittige training stond — zo blijft herstel op orde.';
+  if (wasDowngraded) note += typeof wasDowngraded === 'string' ? ` ${wasDowngraded}` : ' Aangepast in intensiteit omdat er de dag ervoor al een pittige training stond — zo blijft herstel op orde.';
   if (brickNote) note += ' ' + brickNote;
   if (discipline === 'hardlopen' && (intake.injuries || '').trim()) note += ` Met het oog op je opgegeven aandachtspunt ("${intake.injuries.trim()}") bouwen we het hardloopvolume voorzichtiger op — stop bij pijn.`;
   if (weekNumber === 1) note += ' Gebaseerd op je intake.';
@@ -475,8 +476,8 @@ const QUALITY_ROTATION = {
   hardlopen: ['interval', 'fartlek', 'heuveltraining'],
 };
 
-function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWeeks, defaultDays, holidays = [], refWeek = prevWeek) {
-  const { factor: adaptFactor, note: baseAdaptNote } = computeAdaptation(prevWeek);
+function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWeeks, defaultDays, holidays = [], refWeek = prevWeek, extraLog = []) {
+  const { factor: adaptFactor, note: baseAdaptNote } = computeAdaptation(prevWeek, extraLog, intake);
   const hol = weekHolidayInfo(startDate, holidays);
   // Weeknummers lopen door over alle doelen heen (zodat geschiedenis en grafieken kloppen);
   // fase, volumeopbouw en hersteweken tellen vanaf de start van het huidige doel.
@@ -515,14 +516,26 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
     }
   });
 
+  // Extra activiteiten per dag (waterpolo, fietsen, ...): hoe zwaar, en is het een wedstrijd?
+  const dayExtra = Array.from({ length: 7 }, (_, d) => {
+    const key = dateKey(addDays(startDate, d));
+    const list = (extraLog || []).filter((e) => e.date === key);
+    return {
+      hardness: list.reduce((m, e) => Math.max(m, extraHardness(e)), 0),
+      match: list.some((e) => e.kind === 'waterpolo_wedstrijd'),
+      names: list.filter((e) => extraHardness(e) >= 2).map(extraLabel),
+    };
+  });
+
   // Step 3: walk through the week day by day, choosing a type and downgrading it if the previous day was already hard
-  let prevHardness = 0;
+  let prevHardness = 0, prevExtraNames = null;
   const daySessions = new Array(7).fill(null);
   for (let d = 0; d < 7; d++) {
     const slot = daySlots[d];
     if (!slot) {
       daySessions[d] = { id: uid('s'), day: d, discipline: 'rust', type: 'rust', target: null, intensity: INTENSITY.rust, coachNote: TYPE_TEXT.rust, status: 'gepland', result: null };
-      prevHardness = 0;
+      prevHardness = dayExtra[d].hardness;
+      prevExtraNames = dayExtra[d].hardness >= 2 ? dayExtra[d].names : null;
       continue;
     }
     const { discipline, occurrence, total, isFirstOfWeek, role } = slot;
@@ -531,9 +544,15 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
       : role === 'kwaliteit' ? QUALITY_ROTATION[discipline][(goalWeek - 1) % QUALITY_ROTATION[discipline].length]
       : (discipline === 'zwemmen' ? 'techniek' : 'duurloop');
     let wasDowngraded = false;
-    if (HARDNESS[type] >= 2 && prevHardness >= 2) {
+    const extraToday = dayExtra[d];
+    const extraTomorrow = d < 6 ? dayExtra[d + 1] : null;
+    let extraReason = null;
+    if (extraToday.hardness >= 2) extraReason = `Aangepast omdat je die dag ook ${extraToday.names.join(' en ').toLowerCase()} hebt — twee pittige belastingen op één dag is te veel.`;
+    else if (extraTomorrow && extraTomorrow.match) extraReason = 'Aangepast omdat je morgen een waterpolowedstrijd hebt — zo sta je fris aan de start.';
+    else if (prevHardness >= 2 && prevExtraNames) extraReason = `Aangepast omdat je gisteren ${prevExtraNames.join(' en ').toLowerCase()} had en dat nog doorwerkt.`;
+    if (HARDNESS[type] >= 2 && (prevHardness >= 2 || extraReason)) {
       type = discipline === 'zwemmen' ? 'techniek' : discipline === 'hardlopen' ? 'herstel' : 'duurloop';
-      wasDowngraded = true;
+      wasDowngraded = extraReason || true;
     }
     // Near race day, turn the long bike/run session of long-course races into a brick session
     let brickNote = null;
@@ -556,7 +575,8 @@ function generateWeek(weekNumber, startDate, intake, mainGoal, prevWeek, totalWe
       status: 'gepland',
       result: null,
     };
-    prevHardness = HARDNESS[type] ?? 1;
+    prevHardness = Math.max(HARDNESS[type] ?? 1, dayExtra[d].hardness);
+    prevExtraNames = dayExtra[d].hardness >= 2 ? dayExtra[d].names : null;
   }
 
   // Step 4: leg de vakantie over de week heen — rustdagen worden echt rust, en op lichte
@@ -629,13 +649,6 @@ function getDisciplineSeries(weeks, discipline) {
     });
   });
   return series;
-}
-
-function predictValue(series, atWeek, fallback) {
-  if (!series.length) return fallback;
-  const reg = linreg(series.map((s) => ({ x: s.week, y: s.value })));
-  if (!reg) return fallback;
-  return reg.slope * atWeek + reg.intercept;
 }
 
 function parseDurationCell(v) {
@@ -755,23 +768,749 @@ function computeBlockComparison(weeks) {
   return { recent: stats(recentBlock), prior: stats(priorBlock) };
 }
 
-function getRaceBasedEstimate(weeks, mainGoal) {
-  const dist = RACE_TYPES[mainGoal.raceType];
-  const targetTotalKm = dist.swim + dist.bike + dist.run;
-  const races = [];
-  weeks.forEach((w) => {
-    w.sessions.forEach((s) => {
-      if (s.discipline !== 'wedstrijd' || s.status !== 'voltooid' || !s.result || !s.result.duration) return;
-      const sec = parseTargetTime(s.result.duration);
-      const rt = RACE_ADD_TYPES.find((t) => t.label === s.type && !t.manual);
-      if (sec && rt && rt.totalKm) races.push({ date: addDays(new Date(w.startDate), s.day), sec, totalKm: rt.totalKm, name: s.raceName || s.type });
+/* ============================== EXTRA ACTIVITEITEN & BELASTING ============================== */
+
+// Extra activiteiten naast je triatlonschema. Ze tellen mee in je belasting (duur × RPE, de "session-RPE"-methode),
+// sturen je schema bij (geen zware training op dezelfde dag of vlak voor een wedstrijd) en geven een kleine
+// conditiebonus in de voorspelling. `spec` is hoe specifiek de activiteit is voor elke triatlononderdeel (0-1).
+const EXTRA_KINDS = {
+  fiets_transport: {
+    label: 'Fietsen (transport)', short: 'Fietsen', icon: Bike, color: '#6E8B3D',
+    hint: 'Naar werk, school, training of de winkel.',
+    defaultRpe: 3, defaultMinutes: null, speedKmh: 18,
+    spec: { zwemmen: 0, fietsen: 0.5, hardlopen: 0.1 },
+  },
+  waterpolo_training: {
+    label: 'Waterpolo training', short: 'Training', icon: Droplets, color: '#2E7D8F',
+    hint: 'Een gewone trainingsavond.',
+    defaultRpe: 6, defaultMinutes: 90,
+    spec: { zwemmen: 0.45, fietsen: 0.1, hardlopen: 0.15 },
+  },
+  waterpolo_wedstrijd: {
+    label: 'Waterpolo wedstrijd', short: 'Wedstrijd', icon: Trophy, color: '#9C3D54',
+    hint: 'Competitie- of toernooiwedstrijd.',
+    defaultRpe: 8, defaultMinutes: 60,
+    spec: { zwemmen: 0.5, fietsen: 0.1, hardlopen: 0.15 },
+  },
+  overig: {
+    label: 'Andere activiteit', short: 'Overig', icon: Activity, color: '#8A5A44',
+    hint: 'Voetbal, wandelen, klimmen, ...',
+    defaultRpe: 5, defaultMinutes: 45,
+    spec: { zwemmen: 0.1, fietsen: 0.1, hardlopen: 0.1 },
+  },
+};
+const EXTRA_KIND_ORDER = ['fiets_transport', 'waterpolo_training', 'waterpolo_wedstrijd', 'overig'];
+
+const SWIM_MULT = { duurloop: 1.15, interval: 0.9, techniek: 1.2, herstel: 1.3, 'lange training': 1.1, tempo: 1.0, openwater: 1.15, default: 1.1 };
+const BIKE_MULT = { duurloop: 0.85, interval: 1.12, tempo: 1.0, herstel: 0.75, 'lange training': 0.9, klimtraining: 0.8, brick: 0.9, default: 0.9 };
+const RUN_MULT = { duurloop: 1.1, interval: 0.9, tempo: 1.0, herstel: 1.2, 'lange training': 1.08, fartlek: 1.0, heuveltraining: 1.1, brick: 1.05, default: 1.05 };
+
+// Voorspelling: referentieafstand van het intake-tempo en hoe sterk het tempo zakt naarmate de afstand toeneemt.
+const PRED_DISCIPLINES = ['zwemmen', 'fietsen', 'hardlopen'];
+const REF_KM = { zwemmen: 1.5, fietsen: 40, hardlopen: 10 };
+const FATIGUE_EXP = { zwemmen: 1.04, fietsen: 1.03, hardlopen: 1.06 };
+const RUN_OFF_BIKE = { sprint: 0.02, olympic: 0.03, half: 0.05, full: 0.08 };
+const TRANSITION_SEC = { sprint: 240, olympic: 300, half: 360, full: 480 };
+const DAMP_PHI = 0.85;          // verbetering vlakt af: elke week telt 85% van de vorige
+const MAX_SLOPE_PER_WEEK = 0.012; // nooit meer dan 1,2% verbetering per week extrapoleren
+const MAX_TOTAL_CHANGE = 0.1;     // en nooit meer dan 10% verbetering/verslechtering in totaal
+const FITNESS_K = 0.05;
+const FITNESS_CAP = 0.03;         // extra activiteiten geven maximaal 3% winst per onderdeel
+const DEFAULT_SD = { zwemmen: 0.05, fietsen: 0.04, hardlopen: 0.045 };
+
+function clamp(x, lo, hi) { return Math.min(Math.max(x, lo), hi); }
+function toNum(v) { const n = parseFloat(String(v ?? '').replace(',', '.')); return isNaN(n) ? null : n; }
+function nl1(x) { return (Math.round(x * 10) / 10).toString().replace('.', ','); }
+
+function extraMinutes(e) {
+  const m = toNum(e.minutes);
+  if (m && m > 0) return m;
+  const km = toNum(e.km);
+  if (e.kind === 'fiets_transport') return km && km > 0 ? (km / EXTRA_KINDS.fiets_transport.speedKmh) * 60 : 0;
+  return EXTRA_KINDS[e.kind]?.defaultMinutes || 0;
+}
+function extraRpe(e) { return toNum(e.rpe) || EXTRA_KINDS[e.kind]?.defaultRpe || 5; }
+function extraLoad(e) { return extraMinutes(e) * extraRpe(e); }
+function extraLabel(e) { return e.kind === 'overig' && e.name ? e.name : (EXTRA_KINDS[e.kind]?.label || 'Activiteit'); }
+// 0 = nauwelijks belasting, 1 = licht, 2 = pittig, 3 = wedstrijd
+function extraHardness(e) {
+  if (e.kind === 'waterpolo_wedstrijd') return 3;
+  const rpe = extraRpe(e), min = extraMinutes(e);
+  if (rpe >= 7 || (rpe >= 6 && min >= 75)) return 2;
+  if (rpe >= 5) return 1;
+  return 0;
+}
+function extraDetail(e) {
+  const parts = [];
+  const km = toNum(e.km);
+  if (e.kind === 'fiets_transport' && km) parts.push(`${nl1(km)} km`);
+  parts.push(`${Math.round(extraMinutes(e))} min`);
+  parts.push(`RPE ${extraRpe(e)}`);
+  return parts.join(' · ');
+}
+
+function sessionRpe(s) { return toNum(s.result?.rpe) || (s.discipline === 'wedstrijd' ? 8 : 5); }
+
+// Geschatte duur (minuten) van een afgeronde schema-sessie, uit duur, of afstand + tempo.
+function sessionMinutes(s, intake) {
+  const r = s.result;
+  if (!r || (s.status !== 'voltooid' && s.status !== 'aangepast')) return 0;
+  if (s.discipline === 'kracht') {
+    const m = toNum(r.duration) ?? toNum(r.distance) ?? s.target?.amount ?? 0;
+    return m > 0 ? m : 0;
+  }
+  if (s.discipline === 'wedstrijd') { const sec = parseTargetTime(r.duration); return sec ? sec / 60 : 60; }
+  if (r.duration && String(r.duration).includes(':')) { const sec = parseDurationCell(r.duration); if (sec) return sec / 60; }
+  const raw = toNum(r.distance);
+  let km = null;
+  if (raw != null) km = s.discipline === 'zwemmen' ? (raw >= 20 ? raw / 1000 : raw) : (raw > 100 ? raw / 1000 : raw);
+  if (!km && s.target) km = s.target.unit === 'm' ? s.target.amount / 1000 : s.target.unit === 'km' ? s.target.amount : null;
+  if (!km) return 0;
+  if (s.discipline === 'zwemmen') {
+    const p = paceStrToSec(r.pace) || (paceStrToSec(intake.swim.pace) || 135) * SWIM_MULT.default;
+    return (km * 10 * p) / 60;
+  }
+  if (s.discipline === 'fietsen') {
+    const v = toNum(r.speed) || (intake.bike.speedKmh || 25) * BIKE_MULT.default;
+    return (km / v) * 60;
+  }
+  const p = paceStrToSec(r.pace) || (paceStrToSec(intake.run.paceMinKm) || 330) * RUN_MULT.default;
+  return (km * p) / 60;
+}
+
+// Belasting van één kalenderweek: afgeronde schema-sessies + extra activiteiten tot en met vandaag.
+function weekLoadSummary(week, extraLog, intake, todayKey = dateKey(new Date())) {
+  const start = new Date(week.startDate); start.setHours(0, 0, 0, 0);
+  const keys = Array.from({ length: 7 }, (_, i) => dateKey(addDays(start, i)));
+  let planMin = 0, planLoad = 0, planCount = 0;
+  (week.sessions || []).forEach((s) => {
+    const m = sessionMinutes(s, intake);
+    if (m > 0) { planMin += m; planLoad += m * sessionRpe(s); planCount += 1; }
+  });
+  const inWeek = (extraLog || []).filter((e) => keys.includes(e.date)).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const extras = inWeek.filter((e) => e.date <= todayKey);
+  const upcoming = inWeek.filter((e) => e.date > todayKey);
+  let exMin = 0, exLoad = 0;
+  const byKind = {};
+  extras.forEach((e) => {
+    const m = extraMinutes(e);
+    exMin += m; exLoad += extraLoad(e);
+    const b = byKind[e.kind] || (byKind[e.kind] = { count: 0, minutes: 0, km: 0 });
+    b.count += 1; b.minutes += m; b.km += toNum(e.km) || 0;
+  });
+  return { keys, planMin, planLoad, planCount, exMin, exLoad, totalMin: planMin + exMin, totalLoad: planLoad + exLoad, byKind, extras, upcoming, inWeek };
+}
+
+function weeklyLoadSeries(weeks, extraLog, intake, count = 8, endDate = new Date()) {
+  const thisMonday = startOfWeek(endDate); thisMonday.setHours(0, 0, 0, 0);
+  const byStart = {};
+  weeks.forEach((w) => { byStart[dateKey(new Date(w.startDate))] = w; });
+  return Array.from({ length: count }, (_, i) => {
+    const start = addDays(thisMonday, -7 * (count - 1 - i));
+    const w = byStart[dateKey(start)] || { startDate: start.toISOString(), sessions: [] };
+    return { start, label: fmtDayMonth(start), ...weekLoadSummary(w, extraLog, intake, dateKey(endDate)) };
+  });
+}
+
+// Past de adaptatie van de volgende week aan op de extra belasting van de vorige week.
+function computeAdaptation(prevWeek, extraLog, intake) {
+  const base = computeAdaptationBase(prevWeek);
+  if (!prevWeek || !extraLog || !extraLog.length) return base;
+  const s = weekLoadSummary(prevWeek, extraLog, intake);
+  if (s.exLoad <= 0) return base;
+  const share = s.totalLoad ? s.exLoad / s.totalLoad : 0;
+  const hardCount = s.extras.filter((e) => extraHardness(e) >= 2).length;
+  let factor = base.factor;
+  let note = `${base.note} Je extra activiteiten telden vorige week mee (${Math.round(s.exMin)} min, ${Math.round(share * 100)}% van je totale belasting).`;
+  if (hardCount >= 3 || share >= 0.45) {
+    if (factor > 0.95) { factor = 0.95; note += ' Dat was veel naast je schema, dus we bouwen deze week iets voorzichtiger op.'; }
+  } else if (hardCount >= 2 && share >= 0.3) {
+    if (factor > 1.0) { factor = 1.0; note += ' Omdat die pittig waren, houden we het volume deze week gelijk in plaats van op te bouwen.'; }
+  }
+  return { factor, note };
+}
+
+// Welke geplande, nog niet afgeronde sessies moeten verzacht worden vanwege een zware extra activiteit?
+function planSoftening(weeks, entries) {
+  const todayKey = dateKey(new Date());
+  const changes = [], seen = new Set();
+  entries.forEach((e) => {
+    if (extraHardness(e) < 2) return;
+    const targets = [{ key: e.date, why: `Aangepast omdat je die dag ook ${extraLabel(e).toLowerCase()} hebt — twee pittige belastingen op één dag is te veel.` }];
+    if (e.kind === 'waterpolo_wedstrijd') {
+      targets.push({ key: dateKey(addDays(new Date(`${e.date}T12:00:00`), -1)), why: 'Aangepast omdat je morgen een waterpolowedstrijd hebt — zo sta je fris aan de start.' });
+    }
+    targets.forEach((t) => {
+      if (t.key < todayKey) return;
+      weeks.forEach((w) => w.sessions.forEach((s) => {
+        if (s.discipline === 'rust' || s.discipline === 'wedstrijd' || s.status !== 'gepland') return;
+        if ((HARDNESS[s.type] ?? 0) < 2 || seen.has(s.id)) return;
+        if (dateKey(addDays(new Date(w.startDate), s.day)) !== t.key) return;
+        seen.add(s.id);
+        changes.push({ weekId: w.id, sessionId: s.id, why: t.why });
+      }));
     });
   });
+  return changes;
+}
+
+function applySoftening(weeks, changes) {
+  return weeks.map((w) => {
+    const mine = changes.filter((c) => c.weekId === w.id);
+    if (!mine.length) return w;
+    return {
+      ...w,
+      sessions: w.sessions.map((s) => {
+        const c = mine.find((m) => m.sessionId === s.id);
+        if (!c) return s;
+        const softType = softTypeFor(s.discipline);
+        const guide = paceGuidance(s.discipline, softType, null);
+        return {
+          ...s, type: softType, intensity: `${INTENSITY[softType]}${guide ? ` · Doeltempo ${guide}` : ''}`,
+          nutritionTip: NUTRITION_TIPS[softType] || null,
+          coachNote: `${TYPE_TEXT[softType]} ${c.why}`,
+        };
+      }),
+    };
+  });
+}
+
+// Hint in het logboek als de nieuwe activiteit botst met een zware geplande training.
+function conflictHint(dateStr, kind, rpe, minutes, weeks) {
+  if (!dateStr || dateStr < dateKey(new Date())) return null;
+  if (extraHardness({ kind, rpe, minutes }) < 2) return null;
+  const sessionOn = (key) => {
+    for (const w of weeks) for (const s of w.sessions) {
+      if (dateKey(addDays(new Date(w.startDate), s.day)) === key) return s;
+    }
+    return null;
+  };
+  const isHard = (s) => s && s.discipline !== 'rust' && s.discipline !== 'wedstrijd' && s.status === 'gepland' && (HARDNESS[s.type] ?? 0) >= 2;
+  const same = sessionOn(dateStr);
+  if (isHard(same)) return `Op deze dag staat al een pittige training (${same.type} ${DISCIPLINE_META[same.discipline].label.toLowerCase()}). Die wordt automatisch verzacht, zodat je niet twee zware belastingen op één dag hebt.`;
+  if (kind === 'waterpolo_wedstrijd') {
+    const before = sessionOn(dateKey(addDays(new Date(`${dateStr}T12:00:00`), -1)));
+    if (isHard(before)) return `De dag ervoor staat een pittige training (${before.type} ${DISCIPLINE_META[before.discipline].label.toLowerCase()}). Die wordt automatisch verzacht, zodat je fris aan de wedstrijd begint.`;
+  }
+  return null;
+}
+
+/* ============================== VOORSPELLING ============================== */
+
+function weightedFit(points, latestX, halfLife = 4) {
+  const w = points.map((p) => Math.pow(0.5, (latestX - p.x) / halfLife));
+  const sw = w.reduce((a, b) => a + b, 0);
+  const mx = points.reduce((a, p, i) => a + w[i] * p.x, 0) / sw;
+  const my = points.reduce((a, p, i) => a + w[i] * p.y, 0) / sw;
+  const sxx = points.reduce((a, p, i) => a + w[i] * (p.x - mx) ** 2, 0);
+  const sxy = points.reduce((a, p, i) => a + w[i] * (p.x - mx) * (p.y - my), 0);
+  return { w, sw, mx, my, sxx, sxy };
+}
+
+// Schat voor één onderdeel het huidige niveau en het niveau op wedstrijddag.
+// Recente resultaten wegen zwaarder (halfwaardetijd 4 weken), je intake telt als "prior" (gewicht 2 resultaten),
+// en de trend vlakt af naar de wedstrijd toe (gedempte trend) in plaats van rechtdoor te extrapoleren.
+function estimateDiscipline(points, prior, goalEndWeek, discipline) {
+  const n = points.length;
+  if (!n) {
+    return { n: 0, current: prior, projected: prior, slope: 0, trendUsed: false, priorShare: 1, sdRel: DEFAULT_SD[discipline], firstWeek: null, lastWeek: null, h: null };
+  }
+  const pts = points.map((p) => ({ x: p.week, y: p.value }));
+  const xs = pts.map((p) => p.x);
+  const latestX = Math.max(...xs), firstX = Math.min(...xs);
+  const f = weightedFit(pts, latestX);
+  const trendUsed = n >= 4 && new Set(xs).size >= 3 && f.sxx > 0;
+  const rawSlope = trendUsed ? f.sxy / f.sxx : 0;
+  const dataLevel = trendUsed ? f.my + rawSlope * (latestX - f.mx) : f.my;
+  const slope = clamp(rawSlope, -Math.abs(dataLevel) * MAX_SLOPE_PER_WEEK, Math.abs(dataLevel) * MAX_SLOPE_PER_WEEK);
+  const resSd = Math.sqrt(pts.reduce((a, p, i) => a + f.w[i] * (p.y - (f.my + rawSlope * (p.x - f.mx))) ** 2, 0) / f.sw);
+  const priorShare = 2 / (n + 2);
+  const current = dataLevel * (1 - priorShare) + prior * priorShare;
+  const h = Math.max(goalEndWeek - latestX, 0);
+  const damp = h > 0 ? (DAMP_PHI * (1 - Math.pow(DAMP_PHI, h))) / (1 - DAMP_PHI) : 0;
+  const projected = clamp(current + slope * damp, current * (1 - MAX_TOTAL_CHANGE), current * (1 + MAX_TOTAL_CHANGE));
+  const sdRel = n >= 3 ? clamp(resSd / dataLevel, 0.02, 0.08) : DEFAULT_SD[discipline];
+  return { n, current, projected, slope, trendUsed, priorShare, sdRel, firstWeek: firstX, lastWeek: latestX, h, damp };
+}
+
+// Conditiebonus uit extra activiteiten van de afgelopen 4 weken (alleen wat al geweest is).
+function computeFitnessBonus(extraLog, intake, today, nByDisc) {
+  const todayKey = dateKey(today);
+  const fromKey = dateKey(addDays(today, -27));
+  const recent = (extraLog || []).filter((e) => e.date >= fromKey && e.date <= todayKey);
+  const out = { active: false, perDisc: {}, counts: {}, spanWeeks: 0 };
+  if (!recent.length) return out;
+  const first = recent.reduce((m, e) => (e.date < m ? e.date : m), recent[0].date);
+  const spanWeeks = clamp((calendarDaysUntil(new Date(`${first}T00:00:00`), todayKey) + 1) / 7, 1, 4);
+  const baseMin = {
+    zwemmen: Math.max(((intake.swim.volumeKm || 0) * 10 * (paceStrToSec(intake.swim.pace) || 135)) / 60, 45),
+    fietsen: Math.max(((intake.bike.volumeKm || 0) / (intake.bike.speedKmh || 25)) * 60, 60),
+    hardlopen: Math.max(((intake.run.volumeKm || 0) * (paceStrToSec(intake.run.paceMinKm) || 330)) / 60, 45),
+  };
+  PRED_DISCIPLINES.forEach((d) => {
+    let eq = 0;
+    recent.forEach((e) => { eq += extraMinutes(e) * (EXTRA_KINDS[e.kind]?.spec?.[d] || 0) * clamp(extraRpe(e) / 6, 0.5, 1.4); });
+    eq /= spanWeeks;
+    const raw = Math.min(FITNESS_CAP, (FITNESS_K * eq) / baseMin[d]);
+    const dataWeight = 1 - Math.min(0.6, (nByDisc[d] || 0) / 10);
+    out.perDisc[d] = { bonus: raw * dataWeight, rawBonus: raw, dataWeight, equivMin: eq, baseMin: baseMin[d] };
+  });
+  recent.forEach((e) => {
+    const b = out.counts[e.kind] || (out.counts[e.kind] = { count: 0, minutes: 0, km: 0 });
+    b.count += 1; b.minutes += extraMinutes(e); b.km += toNum(e.km) || 0;
+  });
+  out.active = true; out.spanWeeks = spanWeeks;
+  return out;
+}
+
+function raceBasedEstimate(weeks, mainGoal, today) {
+  const dist = RACE_TYPES[mainGoal.raceType];
+  const targetKm = dist.swim + dist.bike + dist.run;
+  const races = [];
+  weeks.forEach((w) => w.sessions.forEach((s) => {
+    if (s.discipline !== 'wedstrijd' || s.status !== 'voltooid' || !s.result || !s.result.duration) return;
+    const sec = parseTargetTime(s.result.duration);
+    const rt = RACE_ADD_TYPES.find((t) => t.label === s.type && !t.manual);
+    if (!sec || !rt) return;
+    const date = addDays(new Date(w.startDate), s.day);
+    const ageWeeks = Math.max(daysBetween(today, date) / 7, 0);
+    const sameType = rt.key === mainGoal.raceType;
+    const scaled = sameType ? sec : sec * Math.pow(targetKm / rt.totalKm, RIEGEL_EXPONENT);
+    const score = Math.pow(0.5, ageWeeks / 10) * (sameType ? 1 : 0.75);
+    races.push({ sec, scaled, date, name: s.raceName || s.type, sameType, score, srcKm: rt.totalKm, ageWeeks });
+  }));
   if (!races.length) return null;
-  races.sort((a, b) => b.date - a.date);
-  const latest = races[0];
-  const seconds = latest.sec * Math.pow(targetTotalKm / latest.totalKm, RIEGEL_EXPONENT);
-  return { seconds, sourceName: latest.name, sourceDate: latest.date, sourceKm: latest.totalKm };
+  const sumScore = races.reduce((a, r) => a + r.score, 0);
+  const seconds = races.reduce((a, r) => a + r.scaled * r.score, 0) / (sumScore || 1);
+  const best = races.reduce((m, r) => (r.score > m.score ? r : m), races[0]);
+  return { seconds, weight: clamp(0.7 * best.score, 0.2, 0.7), best, count: races.length, sourceName: best.name, sourceDate: best.date, sameType: best.sameType };
+}
+
+function fmtDiscVal(d, v) {
+  if (d === 'fietsen') return `${nl1(v)} km/u`;
+  return `${secToPaceStr(v)} /${d === 'zwemmen' ? '100m' : 'km'}`;
+}
+
+function buildPrediction({ weeks, intake, mainGoal, goalEndWeek, extraLog = [], today = new Date() }) {
+  if (!weeks.length) return null;
+  const raceType = mainGoal.raceType;
+  const dist = RACE_TYPES[raceType];
+  const MULTS = { zwemmen: SWIM_MULT, fietsen: BIKE_MULT, hardlopen: RUN_MULT };
+  const priors = {
+    zwemmen: paceStrToSec(intake.swim.pace) || 135,
+    fietsen: Number(intake.bike.speedKmh) || 25,
+    hardlopen: paceStrToSec(intake.run.paceMinKm) || 330,
+  };
+
+  // 1. Resultaten omrekenen naar één vergelijkbaar niveau (een rustige duurtraining is langzamer dan een tempotraining)
+  const series = {}, ignored = {};
+  PRED_DISCIPLINES.forEach((d) => {
+    const pts = []; ignored[d] = 0;
+    weeks.forEach((w) => w.sessions.forEach((s) => {
+      if (s.discipline !== d || s.status !== 'voltooid' || !s.result) return;
+      const raw = d === 'fietsen' ? toNum(s.result.speed) : paceStrToSec(s.result.pace);
+      if (raw == null || raw <= 0) return;
+      const v = raw / (MULTS[d][s.type] ?? MULTS[d].default);
+      if (v < priors[d] * 0.6 || v > priors[d] * 1.6) { ignored[d] += 1; return; } // waarschijnlijk een typfout
+      pts.push({ week: w.weekNumber, value: v });
+    }));
+    series[d] = pts;
+  });
+
+  // 2. Niveau + gedempte trend per onderdeel
+  const est = {};
+  PRED_DISCIPLINES.forEach((d) => { est[d] = estimateDiscipline(series[d], priors[d], goalEndWeek, d); est[d].prior = priors[d]; est[d].ignored = ignored[d]; });
+
+  // 3. Conditiebonus uit extra activiteiten
+  const fit = computeFitnessBonus(extraLog, intake, today, { zwemmen: est.zwemmen.n, fietsen: est.fietsen.n, hardlopen: est.hardlopen.n });
+  PRED_DISCIPLINES.forEach((d) => {
+    const b = fit.perDisc[d]?.bonus || 0;
+    est[d].bonus = b;
+    est[d].final = d === 'fietsen' ? est[d].projected * (1 + b) : est[d].projected * (1 - b);
+  });
+
+  // 4. Naar de wedstrijdafstand rekenen: tempo zakt bij langere afstanden, en je loopt na het fietsen langzamer
+  const scale = {};
+  PRED_DISCIPLINES.forEach((d) => {
+    const km = d === 'zwemmen' ? dist.swim : d === 'fietsen' ? dist.bike : dist.run;
+    scale[d] = { km, factor: Math.pow(km / REF_KM[d], FATIGUE_EXP[d] - 1) };
+  });
+  const offBike = RUN_OFF_BIKE[raceType] ?? 0.03;
+  const swimPace = est.zwemmen.final * scale.zwemmen.factor;
+  const bikeSpeed = est.fietsen.final / scale.fietsen.factor;
+  const runPace = est.hardlopen.final * scale.hardlopen.factor * (1 + offBike);
+  let swimTime = scale.zwemmen.km * 10 * swimPace;
+  let bikeTime = (scale.fietsen.km / bikeSpeed) * 3600;
+  let runTime = scale.hardlopen.km * runPace;
+  const transition = TRANSITION_SEC[raceType] ?? 300;
+  const paceBasedTotal = swimTime + bikeTime + runTime + transition;
+
+  // 5. Eventueel een recent wedstrijdresultaat meewegen
+  const raceBased = raceBasedEstimate(weeks, mainGoal, today);
+  const wRace = raceBased ? raceBased.weight : 0;
+  const total = raceBased ? paceBasedTotal * (1 - wRace) + raceBased.seconds * wRace : paceBasedTotal;
+  if (raceBased) { // splits optellen tot het totaal
+    const k = (total - transition) / (swimTime + bikeTime + runTime);
+    swimTime *= k; bikeTime *= k; runTime *= k;
+  }
+
+  // 6. Marge en betrouwbaarheid
+  const lastWeekNum = weeks[weeks.length - 1].weekNumber;
+  const hMax = Math.max(goalEndWeek - lastWeekNum, 0);
+  const sd = Math.sqrt(
+    (swimTime * est.zwemmen.sdRel) ** 2 + (bikeTime * est.fietsen.sdRel) ** 2 + (runTime * est.hardlopen.sdRel) ** 2
+    + (total * 0.007 * Math.sqrt(Math.max(hMax, 1))) ** 2,
+  );
+  const margin = 1.28 * sd * (raceBased ? 1 - 0.3 * wRace : 1);
+
+  const nTotal = PRED_DISCIPLINES.reduce((a, d) => a + est[d].n, 0);
+  const withData = PRED_DISCIPLINES.filter((d) => est[d].n >= 2);
+  const missing = PRED_DISCIPLINES.filter((d) => est[d].n < 2).map((d) => DISCIPLINE_META[d].label.toLowerCase());
+  const latestResultWeek = Math.max(0, ...PRED_DISCIPLINES.map((d) => est[d].lastWeek || 0));
+  let score = 0;
+  const reasons = [];
+  if (nTotal >= 12) score += 3; else if (nTotal >= 6) score += 2; else if (nTotal >= 3) score += 1;
+  reasons.push(nTotal === 0 ? 'Nog geen trainingsresultaten ingevuld — de voorspelling rust op je intake.' : `${nTotal} trainingsresultaten verwerkt.`);
+  if (withData.length === 3) score += 2; else if (withData.length === 2) score += 1;
+  if (missing.length) reasons.push(`Te weinig resultaten voor ${missing.join(' en ')} (minimaal 2 nodig).`);
+  if (nTotal > 0 && lastWeekNum - latestResultWeek <= 2) score += 1;
+  else if (nTotal > 0) reasons.push('Je laatste resultaat is al wat ouder.');
+  if (raceBased) { score += 2; reasons.push('Een wedstrijdresultaat is meegewogen.'); }
+  if (hMax > 16) { score -= 1; reasons.push(`Nog ${hMax} weken te gaan: ver vooruit voorspellen is onzekerder.`); }
+  else if (hMax <= 6) score += 1;
+  const level = score >= 6 ? 'goed' : score >= 3 ? 'redelijk' : 'laag';
+
+  let statusLabel = null;
+  if (mainGoal.ambition === 'target' && mainGoal.targetTime) {
+    const targetSec = parseTargetTime(mainGoal.targetTime);
+    if (targetSec) {
+      if (total <= targetSec * 1.03) statusLabel = 'op koers';
+      else if (total <= targetSec * 1.12) statusLabel = 'lichte achterstand';
+      else statusLabel = 'actie nodig';
+    }
+  }
+
+  // 7. Uitleg: waar is het op gebaseerd?
+  const disciplineBasis = {};
+  PRED_DISCIPLINES.forEach((d) => {
+    const e = est[d], parts = [];
+    if (e.n === 0) {
+      parts.push(`Nog geen resultaten ingevuld: gebaseerd op het tempo uit je intake (${fmtDiscVal(d, e.prior)}).`);
+    } else {
+      parts.push(`${e.n} ${e.n === 1 ? 'resultaat' : 'resultaten'} uit week ${e.firstWeek}${e.lastWeek !== e.firstWeek ? `–${e.lastWeek}` : ''}, omgerekend naar vergelijkbaar wedstrijdniveau. Huidig niveau: ${fmtDiscVal(d, e.current)}${e.priorShare >= 0.15 ? ` (je intake telt nog voor ${Math.round(e.priorShare * 100)}% mee)` : ''}.`);
+      if (e.trendUsed) {
+        const perWeek = d === 'fietsen'
+          ? `${e.slope >= 0 ? '+' : '−'}${(Math.abs(e.slope)).toFixed(2).replace('.', ',')} km/u`
+          : `${e.slope <= 0 ? '−' : '+'}${Math.abs(e.slope).toFixed(1).replace('.', ',')} sec/${d === 'zwemmen' ? '100m' : 'km'}`;
+        parts.push(`Trend: ${perWeek} per week${e.h > 0 ? `, gedempt over de ${e.h} weken tot de wedstrijd omdat verbetering afvlakt` : ''}.`);
+      } else {
+        parts.push('Nog geen betrouwbare trend (daarvoor zijn minstens 4 resultaten over 3 weken nodig), dus rekenen we met je huidige niveau.');
+      }
+    }
+    if (e.bonus > 0.0005) parts.push(`Extra activiteiten: ${nl1(e.bonus * 100)}% sneller meegerekend.`);
+    if (e.ignored) parts.push(`${e.ignored} onwaarschijnlijke ${e.ignored === 1 ? 'waarde' : 'waarden'} genegeerd (typfout?).`);
+    disciplineBasis[d] = parts.join(' ');
+  });
+
+  const extras = [];
+  if (fit.active) {
+    const per = Object.entries(fit.counts).map(([k, c]) => `${nl1(c.count / fit.spanWeeks)}× ${EXTRA_KINDS[k].label.toLowerCase()}${c.km ? ` (${nl1(c.km / fit.spanWeeks)} km)` : ''}`);
+    const eq = PRED_DISCIPLINES.map((d) => `${Math.round(fit.perDisc[d].equivMin)} min ${d === 'zwemmen' ? 'zwem' : d === 'fietsen' ? 'fiets' : 'loop'}-`).join(', ');
+    extras.push({
+      title: 'Extra activiteiten',
+      text: `Gemiddeld per week in de afgelopen ${nl1(fit.spanWeeks)} ${fit.spanWeeks <= 1 ? 'week' : 'weken'}: ${per.join(', ')}. Dat telt als ongeveer ${eq}training-equivalent per week (naar hoe specifiek de activiteit is en hoe hard die was). Dat levert maximaal ${Math.round(FITNESS_CAP * 100)}% winst per onderdeel op, en minder naarmate je meer resultaten invult — die laten je conditie dan al zien.`,
+    });
+  } else {
+    extras.push({ title: 'Extra activiteiten', text: 'Geen extra activiteiten in de afgelopen 4 weken. Log je fietsritten naar werk en waterpolo in het Logboek: die tellen mee voor je conditie.' });
+  }
+  if (raceBased) {
+    extras.push({
+      title: 'Wedstrijdresultaat',
+      text: `${raceBased.sourceName} (${fmtDate(raceBased.sourceDate)}) weegt voor ${Math.round(wRace * 100)}% mee${raceBased.sameType ? '' : ', omgerekend naar jouw wedstrijdafstand'}. Een oudere wedstrijd telt minder zwaar.`,
+    });
+  }
+  const pct = (x) => `${x >= 0 ? '+' : '−'}${nl1(Math.abs(x * 100))}%`;
+  const corr = [];
+  if (Math.abs(scale.zwemmen.factor - 1) >= 0.0025) corr.push(`zwemtempo ${pct(scale.zwemmen.factor - 1)}`);
+  if (Math.abs(scale.fietsen.factor - 1) >= 0.0025) corr.push(`fietssnelheid ${pct(1 / scale.fietsen.factor - 1)}`);
+  if (Math.abs(scale.hardlopen.factor - 1) >= 0.0025) corr.push(`looptempo ${pct(scale.hardlopen.factor - 1)}`);
+  extras.push({
+    title: 'Afstand en wissels',
+    text: `Wedstrijdafstand: ${nl1(dist.swim)} km zwemmen, ${nl1(dist.bike)} km fietsen, ${nl1(dist.run)} km hardlopen. ${corr.length ? `Omdat je tempo zakt naarmate de afstand toeneemt, is gerekend met ${corr.join(', ')} ten opzichte van een olympische afstand. ` : 'Dat is de afstand waar je intake-tempo voor geldt, dus daar is niets voor gecorrigeerd. '}Hardlopen is daarnaast ${Math.round(offBike * 100)}% langzamer gerekend omdat je van de fiets komt. Wissels: ${Math.round(transition / 60)} min.`,
+  });
+  const assumptions = [
+    'Je intake-tempo geldt als wedstrijdniveau op een olympische afstand; trainingen zijn daarop omgerekend per type (rustig, interval, lang).',
+    'Verbetering vlakt af en we gaan nooit uit van meer dan 10% winst op een onderdeel.',
+    'Geen rekening met weer, golven, wetsuit, parcours of dagvorm.',
+  ];
+
+  return {
+    swimTime, bikeTime, runTime, transition, total, low: total - margin, high: total + margin, margin,
+    paceBasedTotal, statusLabel, hasData: true, hasResults: nTotal > 0, raceBased,
+    confidence: { level, score, reasons },
+    disciplines: est, disciplineBasis, extras, assumptions, fitness: fit,
+  };
+}
+
+function PredictionDetails({ prediction, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  if (!prediction) return null;
+  const conf = prediction.confidence;
+  const c = { laag: { bg: '#F7DAD3', fg: 'var(--danger)' }, redelijk: { bg: '#F6E3C0', fg: 'var(--warning)' }, goed: { bg: 'var(--success-bg)', fg: 'var(--success)' } }[conf.level];
+  return (
+    <div style={{ marginTop: 12 }}>
+      <button type="button" className="tri-pill" onClick={() => setOpen((o) => !o)}
+        style={{ background: 'var(--sand)', color: 'var(--text)', border: 'none', cursor: 'pointer' }}>
+        <Info size={14} /> Waarop is dit gebaseerd? {open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+      </button>
+      {open && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+            <span className="tri-badge" style={{ background: c.bg, color: c.fg }}>Betrouwbaarheid: {conf.level}</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>indicatieve marge ± {Math.max(Math.round(prediction.margin / 60), 1)} min</span>
+          </div>
+          <ul style={{ margin: '0 0 12px', paddingLeft: 18, fontSize: 12, color: 'var(--muted)' }}>
+            {conf.reasons.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+          {PRED_DISCIPLINES.map((d) => {
+            const meta = DISCIPLINE_META[d];
+            const time = d === 'zwemmen' ? prediction.swimTime : d === 'fietsen' ? prediction.bikeTime : prediction.runTime;
+            return (
+              <div key={d} style={{ padding: '10px 0', borderTop: '1px solid var(--sand)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: 14 }}>
+                  <meta.icon size={16} color={meta.color} /><span style={{ flex: 1 }}>{meta.label}</span>
+                  <span style={{ fontFamily: 'Fraunces, serif' }}>{secToHMS(time)}</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                  Verwacht niveau op wedstrijddag: {fmtDiscVal(d, prediction.disciplines[d].final)}. {prediction.disciplineBasis[d]}
+                </div>
+              </div>
+            );
+          })}
+          {prediction.extras.map((x) => (
+            <div key={x.title} style={{ padding: '10px 0', borderTop: '1px solid var(--sand)' }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{x.title}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>{x.text}</div>
+            </div>
+          ))}
+          <div style={{ padding: '10px 0 0', borderTop: '1px solid var(--sand)' }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Aannames</div>
+            <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 12, color: 'var(--muted)' }}>
+              {prediction.assumptions.map((a, i) => <li key={i}>{a}</li>)}
+            </ul>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================== LOGBOEK (extra activiteiten) ============================== */
+
+function LogTab({ extraLog, weeks, intake, onAdd, onRemove, onGoSchedule }) {
+  const todayKey = dateKey(new Date());
+  const lastOfKind = (k) => [...extraLog].filter((e) => e.kind === k).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  const initFor = (k) => {
+    const l = lastOfKind(k), d = EXTRA_KINDS[k];
+    return {
+      km: k === 'fiets_transport' ? (l?.km ?? '') : '',
+      minutes: k === 'fiets_transport' ? '' : (l?.minutes ?? d.defaultMinutes ?? ''),
+      rpe: l?.rpe ?? d.defaultRpe,
+      name: k === 'overig' ? (l?.name ?? '') : '',
+    };
+  };
+  const weekdayOf = (dateStr) => (new Date(`${dateStr}T12:00:00`).getDay() + 6) % 7;
+
+  const [kind, setKind] = useState('fiets_transport');
+  const [date, setDate] = useState(todayKey);
+  const [days, setDays] = useState([weekdayOf(todayKey)]);
+  const [form, setForm] = useState(() => initFor('fiets_transport'));
+  const [notes, setNotes] = useState('');
+  const [repeat, setRepeat] = useState(0);
+  const [msg, setMsg] = useState('');
+
+  const meta = EXTRA_KINDS[kind];
+  const kmNum = toNum(form.km), minNum = toNum(form.minutes);
+  const valid = kind === 'fiets_transport' ? kmNum > 0 : minNum > 0;
+  const weekStart = startOfWeek(new Date(`${date}T12:00:00`));
+  const chosenDates = [];
+  for (let i = 0; i <= repeat; i++) days.forEach((dIdx) => chosenDates.push(dateKey(addDays(weekStart, dIdx + 7 * i))));
+  chosenDates.sort();
+  const hint = valid && chosenDates.length ? conflictHint(chosenDates[0], kind, form.rpe, minNum, weeks) : null;
+
+  function pickKind(k) { setKind(k); setForm(initFor(k)); setRepeat(0); setMsg(''); }
+  function pickDate(v) { setDate(v); if (v) setDays([weekdayOf(v)]); setMsg(''); }
+  function toggleDay(i) { setDays((cur) => (cur.includes(i) ? (cur.length > 1 ? cur.filter((x) => x !== i) : cur) : [...cur, i].sort((a, b) => a - b))); }
+
+  function save() {
+    if (!valid || !chosenDates.length) return;
+    const entries = chosenDates.map((d) => ({
+      id: uid('x'), date: d, kind,
+      km: kind === 'fiets_transport' ? kmNum : null,
+      minutes: minNum > 0 ? minNum : null,
+      rpe: Number(form.rpe),
+      name: kind === 'overig' ? form.name.trim() : '',
+      notes: notes.trim(),
+    }));
+    const softened = onAdd(entries);
+    setMsg(`${entries.length === 1 ? 'Activiteit' : `${entries.length} activiteiten`} toegevoegd.${softened ? ` ${softened === 1 ? 'Eén training is' : `${softened} trainingen zijn`} verzacht in je schema.` : ''}`);
+    setNotes(''); setRepeat(0);
+  }
+
+  const series = useMemo(() => weeklyLoadSeries(weeks, extraLog, intake, 8), [weeks, extraLog, intake]);
+  const thisWeek = series[series.length - 1];
+  const lastFull = series[series.length - 2];
+  const before = series.slice(-6, -2).filter((s) => s.totalLoad > 0);
+  const beforeAvg = before.length ? before.reduce((a, s) => a + s.totalLoad, 0) / before.length : 0;
+  const ratio = lastFull && beforeAvg > 0 ? lastFull.totalLoad / beforeAvg : null;
+  const chartData = series.map((s) => ({ week: s.label, Schema: Math.round(s.planMin), Extra: Math.round(s.exMin) }));
+  const recent = [...extraLog].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 20);
+
+  return (
+    <div className="tri-scroll">
+      <div className="tri-card">
+        <h3 style={{ fontSize: 16, marginBottom: 4 }}>Activiteit toevoegen</h3>
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Alles wat bijdraagt aan je conditie, ook buiten je trainingsschema. Een datum in de toekomst mag ook: dan houdt je schema er rekening mee.</p>
+        <div className="tri-choice-grid" style={{ marginBottom: 14 }}>
+          {EXTRA_KIND_ORDER.map((k) => {
+            const m = EXTRA_KINDS[k];
+            return (
+              <button key={k} className={`tri-choice ${kind === k ? 'selected' : ''}`} style={{ fontSize: 13, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }} onClick={() => pickKind(k)}>
+                <m.icon size={20} color={kind === k ? 'var(--terracotta)' : m.color} />{m.label}
+              </button>
+            );
+          })}
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--muted)', margin: '-6px 0 12px' }}>{meta.hint}</p>
+
+        <div className="tri-field"><label className="tri-label">Datum</label>
+          <input type="date" className="tri-input" value={date} onChange={(e) => pickDate(e.target.value)} /></div>
+        <div className="tri-field"><label className="tri-label">Dagen in die week</label>
+          <div className="tri-daytab">
+            {DAYS.map((label, i) => {
+              const sel = days.includes(i);
+              return (
+                <button key={i} className="tri-choice" style={{ padding: '8px 12px', fontSize: 13, minHeight: 40, borderColor: sel ? 'var(--terracotta)' : undefined, background: sel ? '#FDEEE4' : undefined, color: sel ? 'var(--terracotta)' : undefined }}
+                  onClick={() => toggleDay(i)}>{label}</button>
+              );
+            })}
+          </div>
+        </div>
+
+        {kind === 'fiets_transport' ? (
+          <div className="tri-row">
+            <div className="tri-field"><label className="tri-label">Afstand per dag (km)</label>
+              <input type="number" inputMode="decimal" step="0.5" min="0" className="tri-input" placeholder="bv. 12" value={form.km} onChange={(e) => setForm((f) => ({ ...f, km: e.target.value }))} /></div>
+            <div className="tri-field"><label className="tri-label">Duur (min, optioneel)</label>
+              <input type="number" inputMode="numeric" min="0" className="tri-input" placeholder={kmNum > 0 ? `≈ ${Math.round((kmNum / EXTRA_KINDS.fiets_transport.speedKmh) * 60)}` : 'automatisch'} value={form.minutes} onChange={(e) => setForm((f) => ({ ...f, minutes: e.target.value }))} /></div>
+          </div>
+        ) : (
+          <>
+            {kind === 'overig' && (
+              <div className="tri-field"><label className="tri-label">Wat deed je?</label>
+                <input className="tri-input" placeholder="bv. voetbal, wandelen" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} /></div>
+            )}
+            <div className="tri-field"><label className="tri-label">Duur (min)</label>
+              <input type="number" inputMode="numeric" min="0" className="tri-input" value={form.minutes} onChange={(e) => setForm((f) => ({ ...f, minutes: e.target.value }))} /></div>
+          </>
+        )}
+        <div className="tri-field"><label className="tri-label">Hoe zwaar? RPE (1-10): {form.rpe}</label>
+          <input type="range" min="1" max="10" value={form.rpe} onChange={(e) => setForm((f) => ({ ...f, rpe: e.target.value }))} style={{ width: '100%' }} /></div>
+        <div className="tri-field"><label className="tri-label">Herhalen</label>
+          <select className="tri-select" value={repeat} onChange={(e) => setRepeat(+e.target.value)}>
+            <option value={0}>Alleen die week</option>
+            {[1, 2, 3, 5, 7, 11].map((n) => <option key={n} value={n}>Nog {n} {n === 1 ? 'week' : 'weken'} erbij</option>)}
+          </select></div>
+        <div className="tri-field"><label className="tri-label">Notitie (optioneel)</label>
+          <input className="tri-input" value={notes} onChange={(e) => setNotes(e.target.value)} /></div>
+
+        {hint && (
+          <div style={{ background: '#F6E3C0', borderRadius: 12, padding: 10, fontSize: 13, marginBottom: 12, display: 'flex', gap: 8 }}>
+            <AlertTriangle size={16} color="var(--warning)" style={{ flexShrink: 0, marginTop: 2 }} /><span>{hint}</span>
+          </div>
+        )}
+        <button className="tri-btn tri-btn-primary tri-btn-block" disabled={!valid} onClick={save} style={{ opacity: valid ? 1 : 0.5 }}>
+          <Plus size={16} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+          {chosenDates.length > 1 ? `${chosenDates.length} activiteiten toevoegen` : 'Toevoegen'}
+        </button>
+        {msg && <p style={{ fontSize: 13, color: 'var(--success)', margin: '10px 0 0' }}>{msg}</p>}
+      </div>
+
+      <div className="tri-card">
+        <h3 style={{ fontSize: 16, marginBottom: 10 }}>Deze week tot nu toe</h3>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+          <div style={{ flex: 1, textAlign: 'center', background: '#F2E9DC', borderRadius: 12, padding: '10px 4px' }}>
+            <div style={{ fontSize: 20, fontWeight: 700, fontFamily: 'Fraunces, serif' }}>{Math.round(thisWeek.planMin)}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>min schema</div>
+          </div>
+          <div style={{ flex: 1, textAlign: 'center', background: '#DCEBEE', borderRadius: 12, padding: '10px 4px' }}>
+            <div style={{ fontSize: 20, fontWeight: 700, fontFamily: 'Fraunces, serif', color: '#2E7D8F' }}>{Math.round(thisWeek.exMin)}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>min extra</div>
+          </div>
+          <div style={{ flex: 1, textAlign: 'center', background: '#FDEEE4', borderRadius: 12, padding: '10px 4px' }}>
+            <div style={{ fontSize: 20, fontWeight: 700, fontFamily: 'Fraunces, serif', color: 'var(--terracotta)' }}>{Math.round(thisWeek.totalLoad)}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>belasting</div>
+          </div>
+        </div>
+        {Object.keys(thisWeek.byKind).length === 0 && <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>Nog geen extra activiteiten deze week.</p>}
+        {EXTRA_KIND_ORDER.filter((k) => thisWeek.byKind[k]).map((k) => {
+          const b = thisWeek.byKind[k], m = EXTRA_KINDS[k];
+          return (
+            <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', fontSize: 14 }}>
+              <m.icon size={16} color={m.color} />
+              <span style={{ flex: 1 }}>{m.label}</span>
+              <span style={{ color: 'var(--muted)', fontSize: 13 }}>{b.count}× · {b.km ? `${nl1(b.km)} km · ` : ''}{Math.round(b.minutes)} min</span>
+            </div>
+          );
+        })}
+        {thisWeek.upcoming.length > 0 && (
+          <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0 0' }}>Nog gepland deze week: {thisWeek.upcoming.map((e) => `${DAYS[weekdayOf(e.date)]} ${extraLabel(e).toLowerCase()}`).join(', ')}.</p>
+        )}
+        <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0 0' }}>Belasting = duur × RPE, van je afgeronde schema-trainingen en extra activiteiten samen.</p>
+        {ratio != null && ratio > 1.3 && (
+          <p style={{ fontSize: 13, color: 'var(--warning)', margin: '10px 0 0' }}>Vorige week was je totale belasting {Math.round((ratio - 1) * 100)}% hoger dan je gemiddelde van de weken ervoor. Gun jezelf voldoende herstel.</p>
+        )}
+        {ratio != null && ratio < 0.7 && (
+          <p style={{ fontSize: 13, color: 'var(--muted)', margin: '10px 0 0' }}>Vorige week lag je totale belasting {Math.round((1 - ratio) * 100)}% onder je gemiddelde van de weken ervoor.</p>
+        )}
+        <button className="tri-btn tri-btn-secondary" style={{ marginTop: 12, minHeight: 38, padding: '8px 14px', fontSize: 13 }} onClick={onGoSchedule}>Naar weekschema</button>
+      </div>
+
+      <div className="tri-card">
+        <h3 style={{ fontSize: 15, marginBottom: 12 }}>Trainingstijd per week (min)</h3>
+        <ResponsiveContainer width="100%" height={200}>
+          <BarChart data={chartData}>
+            <CartesianGrid stroke="#EFE2CB" />
+            <XAxis dataKey="week" tick={{ fontSize: 11, fill: '#8A7460' }} interval="preserveStartEnd" minTickGap={14} />
+            <YAxis tick={{ fontSize: 12, fill: '#8A7460' }} />
+            <Tooltip />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="Schema" stackId="a" fill="#E9D7B8" />
+            <Bar dataKey="Extra" stackId="a" fill="#2E7D8F" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="tri-card">
+        <h3 style={{ fontSize: 15, marginBottom: 4 }}>Laatste activiteiten</h3>
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Geplande activiteiten tellen mee zodra de datum voorbij is. Was je er niet? Verwijder ze dan.</p>
+        {recent.length === 0 && <p style={{ fontSize: 14, color: 'var(--muted)', margin: 0 }}>Nog niets toegevoegd.</p>}
+        {recent.map((e) => {
+          const m = EXTRA_KINDS[e.kind] || EXTRA_KINDS.overig;
+          return (
+            <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid var(--sand)' }}>
+              <m.icon size={18} color={m.color} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{extraLabel(e)} {e.date > todayKey && <span className="tri-badge" style={{ background: 'var(--sand)', color: 'var(--muted)', marginLeft: 4 }}>gepland</span>}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{fmtDate(e.date)} · {extraDetail(e)}{e.notes ? ` · ${e.notes}` : ''}</div>
+              </div>
+              <button className="tri-btn tri-btn-secondary" style={{ minHeight: 36, padding: '6px 10px' }} onClick={() => onRemove(e.id)} aria-label="Verwijderen"><Trash2 size={15} /></button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 /* ============================== APP ============================== */
@@ -783,6 +1522,7 @@ export default function App() {
   const [subGoals, setSubGoals] = useState([]);
   const [pastGoals, setPastGoals] = useState([]);
   const [holidays, setHolidays] = useState([]);
+  const [extraLog, setExtraLog] = useState([]);
   const [ngStep, setNgStep] = useState(0);
   const [ngDraft, setNgDraft] = useState({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
   const [ngFinishTime, setNgFinishTime] = useState('');
@@ -831,6 +1571,7 @@ export default function App() {
       if (data.subGoals) setSubGoals(data.subGoals);
       if (data.pastGoals) setPastGoals(data.pastGoals);
       if (data.holidays) setHolidays(data.holidays);
+      if (data.extraLog) setExtraLog(data.extraLog);
       if (data.intake) setIntake(data.intake);
       if (data.weeks) setWeeks(data.weeks);
       if (data.totalWeeks) setTotalWeeks(data.totalWeeks);
@@ -843,7 +1584,7 @@ export default function App() {
   // Autosave (debounced): always to this device instantly, and to Google Sheets when configured
   useEffect(() => {
     if (!loaded) return;
-    const snapshot = { stage: stage === 'newgoal' ? 'app' : stage, mainGoal, subGoals, pastGoals, holidays, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex };
+    const snapshot = { stage: stage === 'newgoal' ? 'app' : stage, mainGoal, subGoals, pastGoals, holidays, extraLog, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex };
     saveLocal(snapshot);
     if (!hasRemote()) { setSyncStatus('local-only'); return; }
     setSyncStatus('saving');
@@ -852,14 +1593,14 @@ export default function App() {
       setSyncStatus(ok ? 'saved' : 'error');
     }, 900);
     return () => clearTimeout(t);
-  }, [loaded, stage, mainGoal, subGoals, pastGoals, holidays, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex]);
+  }, [loaded, stage, mainGoal, subGoals, pastGoals, holidays, extraLog, intake, weeks, totalWeeks, defaultDays, currentWeekIndex, resultsWeekIndex]);
 
   function resetAllData() {
     saveLocal(null);
     if (hasRemote()) saveRemote({});
     setStage('onboarding'); setObStep(0);
     setMainGoal({ raceType: 'olympic', raceDate: '', ambition: 'finish', targetTime: '' });
-    setSubGoals([]); setPastGoals([]); setHolidays([]); setWeeks([]); setTotalWeeks(12); setCurrentWeekIndex(0); setResultsWeekIndex(0);
+    setSubGoals([]); setPastGoals([]); setHolidays([]); setExtraLog([]); setWeeks([]); setTotalWeeks(12); setCurrentWeekIndex(0); setResultsWeekIndex(0);
     setDefaultDays({ zwemmen: [], fietsen: [], hardlopen: [], kracht: [] });
     setShowSettings(false);
   }
@@ -891,12 +1632,24 @@ export default function App() {
         const start = new Date(out[i].startDate); start.setHours(0, 0, 0, 0);
         if (start < thisMonday || weekHasInput(out[i])) continue;
         const prev = i > 0 ? out[i - 1] : null;
-        const fresh = generateWeek(out[i].weekNumber, new Date(out[i].startDate), intake, mainGoal, prev, totalWeeks, defaultDays, nextHolidays, volumeRefWeek(out.slice(0, i)));
+        const fresh = generateWeek(out[i].weekNumber, new Date(out[i].startDate), intake, mainGoal, prev, totalWeeks, defaultDays, nextHolidays, volumeRefWeek(out.slice(0, i)), extraLog);
         out[i] = { ...fresh, id: out[i].id };
         changed = true;
       }
       return changed ? out : ws;
     });
+  }
+
+  // Extra activiteiten: opslaan, en zware geplande sessies op die dag (of de dag voor een wedstrijd) verzachten.
+  function addExtras(entries) {
+    const changes = planSoftening(weeks, entries);
+    setExtraLog((l) => [...l, ...entries].sort((a, b) => (a.date < b.date ? -1 : 1)));
+    if (changes.length) setWeeks((ws) => applySoftening(ws, changes));
+    return changes.length;
+  }
+
+  function removeExtra(id) {
+    setExtraLog((l) => l.filter((e) => e.id !== id));
   }
 
   function saveHoliday(holiday) {
@@ -914,7 +1667,7 @@ export default function App() {
   function finishOnboarding() {
     const tw = weeksUntil(mainGoal.raceDate);
     setTotalWeeks(tw);
-    const week1 = generateWeek(1, startOfWeek(new Date()), intake, mainGoal, null, tw, defaultDays, holidays, null);
+    const week1 = generateWeek(1, startOfWeek(new Date()), intake, mainGoal, null, tw, defaultDays, holidays, null, extraLog);
     setWeeks([week1]);
     setCurrentWeekIndex(0);
     setResultsWeekIndex(0);
@@ -925,7 +1678,7 @@ export default function App() {
     const prev = weeks[weeks.length - 1];
     const nextNum = prev.weekNumber + 1;
     const nextStart = addDays(new Date(prev.startDate), 7);
-    const nextWeek = generateWeek(nextNum, nextStart, intake, mainGoal, prev, totalWeeks, defaultDays, holidays, volumeRefWeek(weeks));
+    const nextWeek = generateWeek(nextNum, nextStart, intake, mainGoal, prev, totalWeeks, defaultDays, holidays, volumeRefWeek(weeks), extraLog);
     setWeeks((w) => [...w, nextWeek]);
     setCurrentWeekIndex(weeks.length);
     setResultsWeekIndex(weeks.length);
@@ -969,7 +1722,7 @@ export default function App() {
       run: { ...intake.run, targetVolumeKm: null },
     };
 
-    const firstWeek = generateWeek(startWeek, nextStart, nextIntake, newGoal, last || null, tw, defaultDays, holidays, volumeRefWeek(weeks));
+    const firstWeek = generateWeek(startWeek, nextStart, nextIntake, newGoal, last || null, tw, defaultDays, holidays, volumeRefWeek(weeks), extraLog);
     setPastGoals((pg) => [...pg, archived]);
     setSubGoals(carriedSubGoals);
     setMainGoal(newGoal);
@@ -986,7 +1739,7 @@ export default function App() {
     setWeeks((ws) => {
       const week = ws[weekIndex];
       const prevWeek = weekIndex > 0 ? ws[weekIndex - 1] : null;
-      const fresh = generateWeek(week.weekNumber, new Date(week.startDate), intake, mainGoal, prevWeek, totalWeeks, defaultDays, holidays, volumeRefWeek(ws.slice(0, weekIndex)));
+      const fresh = generateWeek(week.weekNumber, new Date(week.startDate), intake, mainGoal, prevWeek, totalWeeks, defaultDays, holidays, volumeRefWeek(ws.slice(0, weekIndex)), extraLog);
       return ws.map((w, i) => (i === weekIndex ? { ...fresh, id: w.id } : w));
     });
   }
@@ -1094,41 +1847,13 @@ export default function App() {
   const goalStartWeek = mainGoal.startWeek || 1;
   const goalEndWeek = goalStartWeek + totalWeeks - 1;
 
-  const prediction = useMemo(() => {
-    if (!weeks.length) return null;
-    const swimSeries = getDisciplineSeries(weeks, 'zwemmen');
-    const bikeSeries = getDisciplineSeries(weeks, 'fietsen');
-    const runSeries = getDisciplineSeries(weeks, 'hardlopen');
-    const hasData = swimSeries.length + bikeSeries.length + runSeries.length > 0;
-    const swimFallback = paceStrToSec(intake.swim.pace);
-    const bikeFallback = intake.bike.speedKmh;
-    const runFallback = paceStrToSec(intake.run.paceMinKm);
-    const swimPace = predictValue(swimSeries, goalEndWeek, swimFallback);
-    const bikeSpeed = predictValue(bikeSeries, goalEndWeek, bikeFallback);
-    const runPace = predictValue(runSeries, goalEndWeek, runFallback);
-    const dist = RACE_TYPES[mainGoal.raceType];
-    const swimTime = dist.swim * 1000 / 100 * swimPace;
-    const bikeTime = bikeSpeed > 0 ? (dist.bike / bikeSpeed) * 3600 : 0;
-    const runTime = dist.run * runPace;
-    const transition = 300;
-    const paceBasedTotal = swimTime + bikeTime + runTime + transition;
-    const raceBased = getRaceBasedEstimate(weeks, mainGoal);
-    // Een recent wedstrijdresultaat is een betrouwbaardere voorspeller dan losse trainingspaces, dus die krijgt meer gewicht.
-    const total = raceBased ? (hasData ? raceBased.seconds * 0.65 + paceBasedTotal * 0.35 : raceBased.seconds) : paceBasedTotal;
-    let statusLabel = null;
-    if (mainGoal.ambition === 'target' && mainGoal.targetTime) {
-      const targetSec = parseTargetTime(mainGoal.targetTime);
-      if (targetSec) {
-        if (total <= targetSec * 1.03) statusLabel = 'op koers';
-        else if (total <= targetSec * 1.12) statusLabel = 'lichte achterstand';
-        else statusLabel = 'actie nodig';
-      }
-    }
-    return { swimTime, bikeTime, runTime, transition, total, statusLabel, hasData: hasData || Boolean(raceBased), raceBased };
-  }, [weeks, mainGoal, totalWeeks, goalEndWeek, intake]);
+  const prediction = useMemo(
+    () => buildPrediction({ weeks, intake, mainGoal, goalEndWeek, extraLog, today: new Date() }),
+    [weeks, mainGoal, goalEndWeek, intake, extraLog],
+  );
 
   const recommendation = useMemo(() => {
-    if (!prediction || !prediction.hasData) return 'Vul na je trainingen resultaten in — dan geef ik een gerichte inschatting en advies.';
+    if (!prediction) return 'Vul na je trainingen resultaten in — dan geef ik een gerichte inschatting en advies.';
     const lastWeek = weeks[weeks.length - 1];
     const trainSessions = lastWeek ? lastWeek.sessions.filter((s) => s.discipline !== 'rust') : [];
     const skippedCount = trainSessions.filter((s) => s.status === 'overgeslagen').length;
@@ -1136,8 +1861,15 @@ export default function App() {
     if (prediction.statusLabel === 'op koers') msg = 'Je ligt op koers voor je doeltijd — hou dit ritme vast en blijf consistent trainen.';
     else if (prediction.statusLabel === 'lichte achterstand') msg = 'Je ligt net iets achter op je doeltijd. Focus de komende weken op kwaliteit in je intervaltrainingen.';
     else if (prediction.statusLabel === 'actie nodig') msg = 'Er zit een grotere kloof tussen je verwachte tijd en je doeltijd. Overweeg extra kwaliteitstrainingen of het bijstellen van je doeltijd.';
+    else if (!prediction.hasResults) msg = 'Dit is een eerste inschatting op basis van je intake. Vul na je trainingen je tempo in, dan wordt de voorspelling scherper.';
     else msg = 'Mooi bezig — blijf resultaten invullen zodat de voorspelling scherper wordt.';
+    if (prediction.confidence.level === 'laag' && prediction.hasResults) {
+      const missing = PRED_DISCIPLINES.filter((d) => prediction.disciplines[d].n < 2).map((d) => DISCIPLINE_META[d].label.toLowerCase());
+      if (missing.length) msg += ` Vul vooral tempo’s in voor ${missing.join(' en ')}: daar mist nog data.`;
+    }
     if (prediction.raceBased) msg += ` Deze inschatting houdt rekening met je wedstrijdresultaat van ${prediction.raceBased.sourceName} (${fmtDate(prediction.raceBased.sourceDate)}).`;
+    const boosted = PRED_DISCIPLINES.filter((d) => prediction.disciplines[d].bonus > 0.0005).map((d) => DISCIPLINE_META[d].label.toLowerCase());
+    if (boosted.length) msg += ` Je extra activiteiten geven een kleine conditiebonus voor ${boosted.join(', ')}.`;
     if (skippedCount >= 2) msg += ` Je hebt afgelopen week ${skippedCount} trainingen overgeslagen — geef volgende week de kernsessies (interval en lange training) voorrang.`;
     return msg;
   }, [prediction, weeks]);
@@ -1817,18 +2549,24 @@ export default function App() {
             <h3 style={{ fontSize: 16 }}>Verwachte eindtijd</h3>
             <TrendingUp size={18} color="var(--terracotta)" />
           </div>
-          {prediction && prediction.hasData ? (
+          {prediction ? (
             <>
-              <div style={{ fontSize: 28, fontFamily: 'Fraunces, serif', fontWeight: 700 }}>{secToHMS(prediction.total)}</div>
-              {prediction.statusLabel && (
-                <span className="tri-badge" style={{
-                  background: prediction.statusLabel === 'op koers' ? 'var(--success-bg)' : prediction.statusLabel === 'lichte achterstand' ? '#F6E3C0' : '#F7DAD3',
-                  color: prediction.statusLabel === 'op koers' ? 'var(--success)' : prediction.statusLabel === 'lichte achterstand' ? 'var(--warning)' : 'var(--danger)',
-                }}>{prediction.statusLabel}</span>
-              )}
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 28, fontFamily: 'Fraunces, serif', fontWeight: 700 }}>{secToHMS(prediction.total)}</div>
+                {prediction.statusLabel && (
+                  <span className="tri-badge" style={{
+                    background: prediction.statusLabel === 'op koers' ? 'var(--success-bg)' : prediction.statusLabel === 'lichte achterstand' ? '#F6E3C0' : '#F7DAD3',
+                    color: prediction.statusLabel === 'op koers' ? 'var(--success)' : prediction.statusLabel === 'lichte achterstand' ? 'var(--warning)' : 'var(--danger)',
+                  }}>{prediction.statusLabel}</span>
+                )}
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 2 }}>
+                Waarschijnlijk tussen {secToHMS(prediction.low)} en {secToHMS(prediction.high)} · betrouwbaarheid: {prediction.confidence.level}
+              </div>
             </>
-          ) : <p style={{ fontSize: 14, color: 'var(--muted)' }}>Vul resultaten in om een voorspelling te zien.</p>}
+          ) : <p style={{ fontSize: 14, color: 'var(--muted)' }}>Rond de intake af om een voorspelling te zien.</p>}
           <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 10, marginBottom: 0 }}>{recommendation}</p>
+          <PredictionDetails prediction={prediction} />
         </div>
 
         <div className="tri-card">
@@ -2022,6 +2760,33 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {(() => {
+          const sum = weekLoadSummary(currentWeek, extraLog, intake);
+          return (
+            <div className="tri-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: sum.inWeek.length ? 8 : 0 }}>
+                <h3 style={{ fontSize: 15 }}>Extra activiteiten</h3>
+                <button className="tri-btn tri-btn-secondary" style={{ minHeight: 34, padding: '6px 12px', fontSize: 13 }} onClick={() => setActiveTab('log')}>
+                  <Plus size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />Toevoegen
+                </button>
+              </div>
+              {sum.inWeek.length === 0 && <p style={{ fontSize: 13, color: 'var(--muted)', margin: '8px 0 0' }}>Fietsen naar je werk of waterpolo deze week? Voeg het toe, dan houdt je schema er rekening mee.</p>}
+              {sum.inWeek.map((e) => {
+                const m = EXTRA_KINDS[e.kind] || EXTRA_KINDS.overig;
+                const dIdx = (new Date(`${e.date}T12:00:00`).getDay() + 6) % 7;
+                return (
+                  <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', fontSize: 13 }}>
+                    <m.icon size={15} color={m.color} />
+                    <span style={{ width: 24, fontWeight: 700, color: 'var(--muted)' }}>{DAYS[dIdx]}</span>
+                    <span style={{ flex: 1 }}>{extraLabel(e)}</span>
+                    <span style={{ color: 'var(--muted)' }}>{extraDetail(e)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
 
         {currentWeek.sessions.map((s) => (
           <SessionCard key={s.id} session={s} week={currentWeek}
@@ -2249,11 +3014,18 @@ export default function App() {
     const skipped = allSessions.filter((s) => s.status === 'overgeslagen').length;
     const pct = total ? Math.round((completed / total) * 100) : 0;
 
+    const extraByDate = useMemo(() => {
+      const m = {};
+      extraLog.forEach((e) => { (m[e.date] = m[e.date] || []).push(e); });
+      return m;
+    }, [extraLog]);
+
     const gridStart = startOfWeek(viewMonth);
     const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
     const todayKey = dateKey(new Date());
     const raceKey = mainGoal.raceDate ? dateKey(mainGoal.raceDate) : null;
     const selected = selectedKey ? sessionMap[selectedKey] : null;
+    const selectedExtras = selectedKey ? (extraByDate[selectedKey] || []) : [];
 
     return (
       <div className="tri-scroll">
@@ -2296,6 +3068,7 @@ export default function App() {
               const isToday = key === todayKey;
               const isRace = key === raceKey;
               const meta = s ? DISCIPLINE_META[s.discipline] : null;
+              const dayExtras = extraByDate[key] || [];
               const hol = holidayForDate(d, holidays);
               let bg = 'transparent', border = '1px solid transparent';
               if (hol) { bg = '#EDF1DC'; border = '1px dashed var(--success)'; }
@@ -2306,21 +3079,45 @@ export default function App() {
               }
               if (isRace) border = '1.5px solid var(--terracotta)';
               return (
-                <button key={i} onClick={() => s && setSelectedKey(key)} style={{
+                <button key={i} onClick={() => (s || dayExtras.length) && setSelectedKey(key)} style={{
                   aspectRatio: '1', borderRadius: 10, border, background: bg,
                   opacity: inMonth ? 1 : 0.3, display: 'flex', flexDirection: 'column', alignItems: 'center',
                   justifyContent: 'center', gap: 2, fontSize: 11, fontWeight: isToday ? 800 : 500,
-                  color: isToday ? 'var(--terracotta)' : 'var(--text)', cursor: s ? 'pointer' : 'default', padding: 2,
+                  color: isToday ? 'var(--terracotta)' : 'var(--text)', cursor: (s || dayExtras.length) ? 'pointer' : 'default', padding: 2,
                 }}>
                   <span>{d.getDate()}</span>
                   {meta && <meta.icon size={10} color={meta.color} />}
                   {!meta && hol && <Sun size={10} color="var(--accent)" />}
                   {isRace && <Flag size={9} color="var(--terracotta)" />}
+                  {dayExtras.length > 0 && (
+                    <span style={{ display: 'flex', gap: 2 }}>
+                      {[...new Set(dayExtras.map((e) => e.kind))].map((k) => <span key={k} style={{ width: 5, height: 5, borderRadius: '50%', background: (EXTRA_KINDS[k] || EXTRA_KINDS.overig).color }} />)}
+                    </span>
+                  )}
                 </button>
               );
             })}
           </div>
         </div>
+
+        {extraLog.length > 0 && (
+          <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 14px' }}>Kleine gekleurde stipjes zijn extra activiteiten (fietsen, waterpolo, ...).</p>
+        )}
+
+        {selectedKey && selectedExtras.length > 0 && (
+          <div className="tri-card">
+            <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 6 }}>Extra activiteiten op {fmtDate(selectedKey)}</div>
+            {selectedExtras.map((e) => {
+              const m = EXTRA_KINDS[e.kind] || EXTRA_KINDS.overig;
+              return (
+                <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 14 }}>
+                  <m.icon size={16} color={m.color} /><span style={{ flex: 1, fontWeight: 600 }}>{extraLabel(e)}</span>
+                  <span style={{ color: 'var(--muted)', fontSize: 13 }}>{extraDetail(e)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {holidays.length > 0 && (
           <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 14px', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -2493,7 +3290,7 @@ export default function App() {
         {progressSubTab === 'voorspelling' && (
           <div className="tri-card">
             <h3 style={{ fontSize: 15, marginBottom: 4 }}>Verwachte splits op wedstrijddag</h3>
-            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Op basis van de trend in je resultaten, geëxtrapoleerd naar {mainGoal.raceDate ? `je wedstrijddag (${fmtDate(mainGoal.raceDate)})` : 'het einde van je plan'}.</p>
+            <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Op basis van je resultaten, extra activiteiten en wedstrijdafstand, geëxtrapoleerd naar {mainGoal.raceDate ? `je wedstrijddag (${fmtDate(mainGoal.raceDate)})` : 'het einde van je plan'}.</p>
             {prediction && (
               <>
                 {[
@@ -2507,12 +3304,17 @@ export default function App() {
                     <div style={{ fontFamily: 'Fraunces, serif', fontWeight: 700 }}>{secToHMS(row.time)}</div>
                   </div>
                 ))}
-                <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 12, fontWeight: 700, fontSize: 17 }}>
-                  <span>Totaal (incl. wissels)</span><span>{secToHMS(prediction.total)}</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0 0', fontSize: 13, color: 'var(--muted)' }}>
+                  <span>Wissels</span><span>{secToHMS(prediction.transition)}</span>
                 </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 8, fontWeight: 700, fontSize: 17 }}>
+                  <span>Totaal</span><span>{secToHMS(prediction.total)}</span>
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>Waarschijnlijk tussen {secToHMS(prediction.low)} en {secToHMS(prediction.high)}</div>
                 {mainGoal.ambition === 'target' && mainGoal.targetTime && (
                   <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 6 }}>Doeltijd: {mainGoal.targetTime}</div>
                 )}
+                <PredictionDetails prediction={prediction} defaultOpen />
                 <div className="tri-card" style={{ background: '#FDEEE4', marginTop: 14, boxShadow: 'none' }}>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                     <AlertTriangle size={18} color="var(--terracotta)" style={{ flexShrink: 0, marginTop: 2 }} />
@@ -2633,6 +3435,7 @@ export default function App() {
   const tabs = [
     { key: 'dashboard', label: 'Doelen', icon: Target },
     { key: 'schedule', label: 'Weekschema', icon: Calendar },
+    { key: 'log', label: 'Logboek', icon: Activity },
     { key: 'results', label: 'Resultaten', icon: Award },
     { key: 'calendar', label: 'Kalender', icon: Grid3x3 },
     { key: 'progress', label: 'Voortgang', icon: TrendingUp },
@@ -2643,7 +3446,7 @@ export default function App() {
       {styleBlock}
       <div className="tri-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <div className="tri-eyebrow">Triathlon coach</div>
+          <div className="tri-eyebrow">Trainingsapp</div>
           <h1 style={{ fontSize: 22 }}>{tabs.find((t) => t.key === activeTab).label}</h1>
         </div>
         <button className="tri-btn tri-btn-secondary" style={{ minHeight: 40, padding: '8px 12px', marginTop: 4, position: 'relative' }} onClick={() => setShowSettings(true)}>
@@ -2657,6 +3460,7 @@ export default function App() {
       </div>
       {activeTab === 'dashboard' && <DashboardTab />}
       {activeTab === 'schedule' && <ScheduleTab />}
+      {activeTab === 'log' && <LogTab extraLog={extraLog} weeks={weeks} intake={intake} onAdd={addExtras} onRemove={removeExtra} onGoSchedule={() => { setActiveTab('schedule'); setCurrentWeekIndex(Math.max(weeks.findIndex((w) => weekLoadSummary(w, [], intake).keys.includes(dateKey(new Date()))), 0)); }} />}
       {activeTab === 'results' && <ResultsTab />}
       {activeTab === 'calendar' && <CalendarTab />}
       {activeTab === 'progress' && <ProgressTab />}
